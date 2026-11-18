@@ -124,10 +124,21 @@ per API key. To stay well under it:
 - Accept threshold, prefer the original publication (for localized reprints), cover comparison on/off
 - Claude CLI on/off, executable path and model. **The cover image is sent to Claude when this is on.**
 
+## Install
+Download `ComicVineAI-vX.Y.Z.zip` from the Releases page, close ComicRack and unpack the `Comic Vine AI` folder into the `Scripts`
+folder of your ComicRack profile (the one next to `ComicDb.xml`). The plugin is a single DLL and needs a ComicRack Community Edition
+build with .NET plugin support (the `feature/dotnet-plugin` branch of ComicRackCE).
+
+## Version
+The version (see `<Version>` in `ComicVineAI.csproj`) shows in the title of every window of the plugin, in the plugin description
+of ComicRack and in the first line of the log of each run. Please include it when you report a problem.
+
 ## Build
-Build ComicRackCE from the `origin/feature/dotnet-plugin` branch first, then:
+Build ComicRackCE from the `feature/dotnet-plugin` branch first. The project looks for its DLLs in
+`..\ComicRackCE\ComicRack\bin\Release\net48\`; if yours are elsewhere pass `-p:ComicRackBin=<path>\` (with the final backslash):
 
     dotnet build -c Release -p:ComicRackBin=<path to ComicRack\bin\Release\net48>\
 
-## Install
-Copy `ComicVineAI.dll` to `<ComicRack profile>\Scripts\Comic Vine AI\`.
+To make the zip for ComicRack (`dist\ComicVineAI-vX.Y.Z.zip`):
+
+    .\package.ps1 -ComicRackBin <path to ComicRack\bin\Release\net48>\

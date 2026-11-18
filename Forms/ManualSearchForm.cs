@@ -103,7 +103,7 @@ namespace ComicVineAI
 			this.pageCount = Math.Max(0, pageCount);
 
 			Font = Ui.CreateFont();
-			Text = Loc.T("manual.title", title);
+			Text = Loc.T("manual.title", title) + " (v" + AppInfo.Version + ")";
 			StartPosition = FormStartPosition.CenterParent;
 			MinimumSize = Ui.Px(900, 600);
 			ShowInTaskbar = false;

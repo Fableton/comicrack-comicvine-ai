@@ -5,6 +5,9 @@
     <LangVersion>14.0</LangVersion>
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>ComicVineAI</AssemblyName>
+    <!-- the version of the plugin: shown in the windows and in the log (AppInfo) and in the name of the release zip -->
+    <Version>0.1.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <RootNamespace>ComicVineAI</RootNamespace>
     <Nullable>disable</Nullable>
     <Platform>AnyCPU</Platform>

@@ -57,6 +57,7 @@ namespace ComicVineAI
 			comicVine = new ComicVineClient(settings.ComicVineApiKey, cache, new UsageTracker(pluginFolder), Status, localDb);
 			form.Shown += (s, e) =>
 			{
+				Log(AppInfo.NameAndVersion);
 				if (localDb != null)
 				{
 					Log(Loc.T("batch.localDb", localDb.Volumes.ToString("N0"), localDb.Issues.ToString("N0"), localDb.SyncDate));

@@ -17,13 +17,13 @@ namespace ComicVineAI
 		public ComicVineAIPlugin()
 		{
 			Name = "Comic Vine AI";
-			Description = Loc.T("plugin.description");
+			Description = Loc.T("plugin.description") + " (v" + AppInfo.Version + ")";
 			Image = "comicvineai.png"; // embedded in the DLL: this is what makes ComicRack show the toolbar button
 		}
 
 		protected override void OnLoad()
 		{
-			Log($"Loaded from {ScriptPath}");
+			Log($"{AppInfo.NameAndVersion} loaded from {ScriptPath}");
 		}
 
 		// IBooks: the selected books of the library.

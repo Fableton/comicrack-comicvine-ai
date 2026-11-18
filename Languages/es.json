@@ -2,7 +2,6 @@
   "language.name": "Español",
   "plugin.description": "Identifica cómics en Comic Vine (metadatos, portadas y Claude) y los etiqueta.",
   "common.na": "n/d",
-  "progress.title": "Comic Vine AI",
   "progress.cancel": "Cancelar",
   "progress.close": "Cerrar",
   "progress.cancelHint": "Detiene la búsqueda. Los libros que no se identificaron con suficiente certeza se ofrecen para revisión manual.",

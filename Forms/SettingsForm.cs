@@ -49,7 +49,7 @@ namespace ComicVineAI
 			this.settings = settings;
 			this.pluginFolder = pluginFolder;
 			Font = Ui.CreateFont();
-			Text = Loc.T("settings.title");
+			Text = Loc.T("settings.title") + " (v" + AppInfo.Version + ")";
 			StartPosition = FormStartPosition.CenterParent;
 			MinimumSize = Ui.Px(760, 600);
 			ShowInTaskbar = false;

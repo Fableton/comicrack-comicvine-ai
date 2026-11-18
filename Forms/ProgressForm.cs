@@ -65,7 +65,7 @@ namespace ComicVineAI
 		{
 			this.threshold = threshold;
 			Font = Ui.CreateFont();
-			Text = Loc.T("progress.title");
+			Text = AppInfo.NameAndVersion;
 			StartPosition = FormStartPosition.CenterParent;
 			MinimumSize = Ui.Px(900, 600);
 			ShowInTaskbar = false;
