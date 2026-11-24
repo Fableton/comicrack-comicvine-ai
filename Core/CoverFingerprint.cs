@@ -60,6 +60,83 @@ namespace ComicVineAI
 			return dHash.ToString("x16") + ":" + Convert.ToBase64String(bytes);
 		}
 
+		/// <summary>
+		/// Version of the comparison. The cached fingerprints and scores (CoverStore) belong to one version: change it whenever the grids
+		/// or the way two covers are compared change, and the old ones are simply not found any more.
+		/// </summary>
+		public const int Version = 1;
+
+		private string key;
+
+		/// <summary>A short stable name of this cover (for the cache of scores): the same image gives the same key in every run.</summary>
+		public string Key
+		{
+			get
+			{
+				if (key == null)
+				{
+					using (System.Security.Cryptography.SHA1 sha = System.Security.Cryptography.SHA1.Create())
+					{
+						byte[] hash = sha.ComputeHash(System.Text.Encoding.ASCII.GetBytes(Encode()));
+						key = BitConverter.ToString(hash, 0, 8).Replace("-", "").ToLowerInvariant();
+					}
+				}
+				return key;
+			}
+		}
+
+		/// <summary>The whole fingerprint (hash, thumbnail and the five grids, quantized to 1/32) as bytes, about 4.6 KB. Null if it has no grids.</summary>
+		public byte[] EncodeFull()
+		{
+			if (grids == null)
+			{
+				return null;
+			}
+			byte[] result = new byte[1 + 8 + gray.Length + grids.Length * GridWidth * GridHeight];
+			result[0] = (byte)Version;
+			Buffer.BlockCopy(BitConverter.GetBytes(dHash), 0, result, 1, 8);
+			int at = 9;
+			foreach (double g in gray)
+			{
+				result[at++] = (byte)Math.Max(0, Math.Min(255, Math.Round(g)));
+			}
+			foreach (float[] grid in grids)
+			{
+				foreach (float v in grid)
+				{
+					result[at++] = unchecked((byte)(sbyte)Math.Max(-127, Math.Min(127, Math.Round(v * 32))));
+				}
+			}
+			return result;
+		}
+
+		/// <summary>Null when the bytes are not a fingerprint of this version.</summary>
+		public static CoverFingerprint DecodeFull(byte[] bytes)
+		{
+			int cells = GridWidth * GridHeight;
+			if (bytes == null || bytes.Length != 1 + 8 + GraySize * GraySize + Insets.Length * cells || bytes[0] != Version)
+			{
+				return null;
+			}
+			ulong hash = BitConverter.ToUInt64(bytes, 1);
+			int at = 9;
+			double[] gray = new double[GraySize * GraySize];
+			for (int i = 0; i < gray.Length; i++)
+			{
+				gray[i] = bytes[at++];
+			}
+			float[][] grids = new float[Insets.Length][];
+			for (int n = 0; n < grids.Length; n++)
+			{
+				grids[n] = new float[cells];
+				for (int i = 0; i < cells; i++)
+				{
+					grids[n][i] = unchecked((sbyte)bytes[at++]) / 32f;
+				}
+			}
+			return new CoverFingerprint(hash, gray, grids);
+		}
+
 		/// <summary>Null when the text is not a fingerprint.</summary>
 		public static CoverFingerprint Decode(string text)
 		{

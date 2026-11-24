@@ -67,6 +67,9 @@ namespace ComicVineAI
 		/// <summary>Put the date in that note.</summary>
 		public bool NoteScrapeDate { get; set; }
 
+		/// <summary>The pages of a tagged book are all marked as story pages and the matched cover as the front cover (the pages the user changed by hand keep their type).</summary>
+		public bool SetPageTypes { get; set; } = true;
+
 		/// <summary>Publisher aliases, one per line: "name --> alias".</summary>
 		public string PublisherAliases { get; set; } = "";
 
@@ -75,6 +78,15 @@ namespace ComicVineAI
 
 		/// <summary>Skip books that were already scraped (they have a comicvine_issue value).</summary>
 		public bool SkipAlreadyScraped { get; set; } = true;
+
+		/// <summary>The research with AI may open a link in Chrome (Claude in Chrome) when Claude cannot read it with its web fetch tool.</summary>
+		public bool AiChromeFallback { get; set; } = true;
+
+		/// <summary>Ask "automatic or manual?" every time before a run starts. When off, the run starts with the mode of ManualOnly.</summary>
+		public bool AskBeforeStart { get; set; } = true;
+
+		/// <summary>No book is tagged automatically: every one goes to the manual review, with the search results and their match percentage.</summary>
+		public bool ManualOnly { get; set; }
 
 		/// <summary>How many candidate volumes are checked for each search.</summary>
 		public int MaxVolumeCandidates { get; set; } = 4;

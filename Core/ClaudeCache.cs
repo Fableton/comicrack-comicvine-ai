@@ -60,6 +60,31 @@ namespace ComicVineAI
 			}
 		}
 
+		/// <summary>
+		/// Deletes the saved answers that are older than the given number of days (0 or less: all of them), straight in the file, for the
+		/// settings window. With dryRun nothing is changed, it only says how many would go. Returns how many are removed and how many stay.
+		/// </summary>
+		public static void Purge(string folder, int olderThanDays, bool dryRun, out int removed, out int kept)
+		{
+			removed = 0;
+			kept = 0;
+			string path = Path.Combine(folder, "claude-cache.json");
+			if (!File.Exists(path))
+			{
+				return;
+			}
+			JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+			List<Entry> stored = json.Deserialize<List<Entry>>(File.ReadAllText(path, Encoding.UTF8)) ?? new List<Entry>();
+			long cut = olderThanDays > 0 ? DateTimeOffset.UtcNow.AddDays(-olderThanDays).ToUnixTimeSeconds() : long.MaxValue;
+			List<Entry> keep = stored.Where(e => e != null && e.Saved >= cut).ToList(); // Saved < cut is older than the limit
+			removed = stored.Count - keep.Count;
+			kept = keep.Count;
+			if (!dryRun && removed > 0)
+			{
+				File.WriteAllText(path, json.Serialize(keep), new UTF8Encoding(false));
+			}
+		}
+
 		public int Count
 		{
 			get

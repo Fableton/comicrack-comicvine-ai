@@ -200,7 +200,7 @@ namespace ComicVineAI
 				if (claudeKey != null && claudeCache != null && claudeCache.TryGet(claudeKey, settings.PreferOriginal, Loc.Code, out ClaudeSuggestion cached))
 				{
 					log(Loc.T("id.claudeCached"));
-					return cached;
+					return ClaudeCli.WithFileNumber(cached, hints);
 				}
 				log(Loc.T("id.askingClaude"));
 				ClaudeSuggestion suggestion = ClaudeCli.Identify(cover, hints, settings, log, token);
@@ -208,7 +208,7 @@ namespace ComicVineAI
 				{
 					claudeCache?.Put(claudeKey, settings.PreferOriginal, Loc.Code, suggestion);
 				}
-				return suggestion;
+				return ClaudeCli.WithFileNumber(suggestion, hints);
 			}
 			catch (OperationCanceledException)
 			{
@@ -320,17 +320,176 @@ namespace ComicVineAI
 				}
 			}
 			List<IssueMatch> ranked = matches.OrderByDescending(m => m.Confidence).ToList();
+			if (cover != null && local && (ranked.Count == 0 || ranked[0].Confidence < settings.AcceptThreshold))
+			{
+				// Nothing is sure yet: the number of the file may not be the number of the original (a local edition), or the book may have
+				// no number. The covers of the issues around that number in the likeliest series are compared (their images cost no
+				// call and are kept on disk), and the one that looks like the cover of the book wins.
+				token.ThrowIfCancellationRequested();
+				matches.AddRange(DeepCoverSearch(hints, cover, volumes, source, token));
+				ranked = matches.OrderByDescending(m => m.Confidence).ToList();
+			}
 			if (cover != null && ranked.Count > 0 && ranked[0].Confidence < settings.AcceptThreshold)
 			{
 				// Nothing is sure yet. The cover of the book may be a variant that looks nothing like the main cover, so the
-				// alternative covers of the two best candidates of the right series are checked (one call each).
-				foreach (IssueMatch candidate in ranked.Where(m => m.NameScore >= 0.8).Take(2).ToList())
+				// alternative covers of the best candidates of the right series are checked (one call each, none with the local database).
+				foreach (IssueMatch candidate in ranked.Where(m => m.NameScore >= 0.8).Take(local ? 3 : 2).ToList())
 				{
 					ImproveWithAlternates(candidate, cover, token);
 				}
 				ranked = ranked.OrderByDescending(m => m.Confidence).ToList();
 			}
 			return ranked;
+		}
+
+		private const int DeepVolumes = 5; // series whose covers are compared when the number of the file does not settle it
+		private const int DeepIssuesPerVolume = 14; // issues of each one (the closest to the number of the file first)
+		private const int DeepAlternateIssues = 3; // of those, how many also have their alternative covers compared
+		private const int DeepAlternatesPerIssue = 4;
+		private const double DistinctCover = 0.70; // a cover this similar...
+		private const double DistinctMargin = 0.25; // ...and this far above every other cover compared in its series is the issue (see DeepCoverSearch)
+		private const double CoverStandsOut = 0.12; // how much better than the next issue of the series the cover has to be to trust it alone
+
+		/// <summary>The first number of the hints that is a plain number, or NaN.</summary>
+		private static double WantedNumber(BookHints hints)
+		{
+			foreach (string number in hints.Numbers)
+			{
+				double value = NumberOf(number);
+				if (!double.IsNaN(value))
+				{
+					return value;
+				}
+			}
+			return double.NaN;
+		}
+
+		private static double NumberOf(string number) =>
+			double.TryParse(TextMatch.NormalizeNumber(number ?? ""), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double v) ? v : double.NaN;
+
+		/// <summary>
+		/// The cover of the book against the covers of several issues of each of the likeliest series (all of them already on the local
+		/// database: no call), not only against the issue that the file name says. Finds the right issue when the number of the file is
+		/// the number of a local edition, or when there is none. Returns at most two matches, best first.
+		/// </summary>
+		private List<IssueMatch> DeepCoverSearch(BookHints hints, CoverFingerprint cover, List<Tuple<VolumeInfo, double, double>> volumes, string source, CancellationToken token)
+		{
+			List<IssueMatch> found = new List<IssueMatch>();
+			double wanted = WantedNumber(hints);
+			List<Tuple<Tuple<VolumeInfo, double, double>, List<IssueInfo>>> plans = new List<Tuple<Tuple<VolumeInfo, double, double>, List<IssueInfo>>>();
+			foreach (Tuple<VolumeInfo, double, double> entry in volumes.Where(t => t.Item1.Local && t.Item2 >= 0.3).OrderByDescending(t => t.Item3).Take(DeepVolumes))
+			{
+				IEnumerable<IssueInfo> issues = comicVine.ListIssues(entry.Item1, token).Where(i => !string.IsNullOrEmpty(i.ImageUrl));
+				if (!double.IsNaN(wanted))
+				{
+					issues = issues.OrderBy(i => { double n = NumberOf(i.Number); return double.IsNaN(n) ? double.MaxValue : Math.Abs(n - wanted); });
+				}
+				plans.Add(Tuple.Create(entry, issues.Take(DeepIssuesPerVolume).ToList()));
+			}
+			if (plans.Count == 0)
+			{
+				return found;
+			}
+
+			CoverStore store = comicVine.Covers;
+			List<string> missing = plans.SelectMany(p => p.Item2).Select(i => i.ImageUrl).Distinct()
+				.Where(u => !store.TryGetScore(cover, u, out double ignored) && !store.HasFingerprint(u)).ToList();
+			log(Loc.T("id.deepSearch", plans.Sum(p => p.Item2.Count), plans.Count, missing.Count));
+			if (missing.Count > 0)
+			{
+				// the images are fetched four at a time (they are not API calls); the comparison below then finds them on disk
+				try
+				{
+					System.Threading.Tasks.Parallel.ForEach(missing, new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = token }, url => comicVine.PrefetchImage(url, token));
+				}
+				catch (AggregateException) when (token.IsCancellationRequested)
+				{
+					throw new OperationCanceledException(token);
+				}
+			}
+
+			foreach (Tuple<Tuple<VolumeInfo, double, double>, List<IssueInfo>> plan in plans)
+			{
+				token.ThrowIfCancellationRequested();
+				VolumeInfo volume = plan.Item1.Item1;
+				List<Tuple<IssueInfo, double, bool>> scored = new List<Tuple<IssueInfo, double, bool>>(); // issue, best score, from an alternative cover
+				int position = 0;
+				foreach (IssueInfo issue in plan.Item2)
+				{
+					double score = ScoreCover(cover, issue.ImageUrl, token, false, out _);
+					bool alternate = false;
+					if (score < StrongCoverMatch && position < DeepAlternateIssues && !double.IsNaN(wanted) && comicVine.LoadAlternatesFree(issue))
+					{
+						foreach (string url in issue.AltImageUrls.Where(u => u != issue.ImageUrl).Take(DeepAlternatesPerIssue))
+						{
+							double s = ScoreCover(cover, url, token, false, out _);
+							if (s > score)
+							{
+								score = s;
+								alternate = true;
+							}
+							if (score >= StrongCoverMatch)
+							{
+								break;
+							}
+						}
+					}
+					position++;
+					scored.Add(Tuple.Create(issue, score, alternate));
+				}
+				List<Tuple<IssueInfo, double, bool>> ordered = scored.Where(t => t.Item2 >= 0).OrderByDescending(t => t.Item2).ToList();
+				if (ordered.Count == 0)
+				{
+					continue;
+				}
+				Tuple<IssueInfo, double, bool> best = ordered[0];
+				double margin = ordered.Count > 1 ? best.Item2 - ordered[1].Item2 : 1.0;
+				bool sameNumber = hints.Numbers.Any(n => TextMatch.NormalizeNumber(n) == TextMatch.NormalizeNumber(best.Item1.Number));
+				IssueMatch match = new IssueMatch
+				{
+					Volume = volume, Issue = best.Item1, NameScore = plan.Item1.Item2, VolumeScore = plan.Item1.Item3, CoverScore = best.Item2, Source = source,
+					FromAlternate = best.Item3
+				};
+				if (IsUnwantedCollection(volume, hints))
+				{
+					match.Penalty = 0.75;
+				}
+				// The number of the file is the strongest evidence there is, so a cover that points to another number needs to stand out
+				// clearly from the neighbours (consecutive issues can look alike) and to be a strong match to be believed.
+				match.NumberDiffers = hints.Numbers.Count > 0 && !sameNumber;
+				bool stands = margin >= CoverStandsOut && best.Item2 >= StrongCoverMatch;
+				match.NumberFactor = sameNumber ? 1.0 : match.NumberDiffers ? (stands ? 0.92 : 0.7) : (stands ? 1.0 : 0.85); // the last one: the file has no number
+				// A scan with translated lettering and other colours rarely scores above 85%, but when no other cover of the series comes
+				// anywhere near it (a margin of 25 points or more over the next issue), it is that issue: the cover is then fully believed.
+				bool distinct = best.Item2 >= DistinctCover && margin >= DistinctMargin && plan.Item1.Item2 >= 0.5;
+				match.Confidence = Combine(match.VolumeScore, match.CoverScore, distinct) * match.Penalty * match.NumberFactor;
+				found.Add(match);
+			}
+
+			found = found.OrderByDescending(m => m.Confidence).Take(2).ToList();
+			if (found.Count > 0)
+			{
+				IssueMatch top = found[0]; // only the best one is worth a line in the log, and only if the cover really looks like it
+				if (top.NumberDiffers && top.CoverScore >= CoverFloor)
+				{
+					log(Loc.T("id.numberDiffers", top.Issue.Number, string.Join(", ", hints.Numbers), top.Volume.Name));
+				}
+				if (top.FromAlternate && top.CoverScore >= CoverFloor)
+				{
+					log(Loc.T("id.altCover", top.Volume.Name, top.Issue.Number, top.CoverScore.ToString("P0")));
+				}
+			}
+			if (found.Count > 0 && CandidateCompared != null)
+			{
+				using (Bitmap shown = comicVine.DownloadImage(found[0].Issue.ImageUrl, token))
+				{
+					if (shown != null)
+					{
+						CandidateCompared(found[0], shown);
+					}
+				}
+			}
+			return found;
 		}
 
 		/// <summary>
@@ -387,8 +546,25 @@ namespace ComicVineAI
 					}
 				}
 			}
-			return names.Take(local ? 12 : 3);
+			if (local)
+			{
+				// The words of the name on their own ("Batman y Robin: Título" -> "Robin", "Título"): the series may be known by only one of
+				// them. They go last, so they never take the place of a longer name, and the search is free.
+				foreach (string name in hints.SeriesNames.Take(2))
+				{
+					foreach (string word in System.Text.RegularExpressions.Regex.Matches(name, @"[\p{L}][\p{L}\p{N}'’-]*").Cast<System.Text.RegularExpressions.Match>().Select(m => m.Value))
+					{
+						if (word.Length >= 4 && !SearchStopWords.Contains(TextMatch.Normalize(word)))
+						{
+							AddName(names, word);
+						}
+					}
+				}
+			}
+			return names.Take(local ? 18 : 3);
 		}
+
+		private static readonly HashSet<string> SearchStopWords = new HashSet<string> { "the", "and", "with", "from", "that", "this", "para", "con", "los", "las", "del", "una", "uno", "por", "y", "les", "des", "une", "pour", "avec", "dans" };
 
 		private IssueMatch TryVolume(VolumeInfo volume, double nameScore, double volumeScore, BookHints hints, CoverFingerprint cover, string source, CancellationToken token)
 		{
@@ -434,6 +610,11 @@ namespace ComicVineAI
 		/// <summary>Compares the cover of the book with the alternative (variant) covers of the issue. One call for the details.</summary>
 		private void ImproveWithAlternates(IssueMatch match, CoverFingerprint cover, CancellationToken token)
 		{
+			if (match.AlternatesChecked)
+			{
+				return;
+			}
+			match.AlternatesChecked = true;
 			comicVine.LoadDetails(match.Issue, token); // the details are needed to write the metadata anyway
 			double best = match.CoverScore;
 			Bitmap bestCover = null; // the alternative cover that matches best, to show it
@@ -460,7 +641,9 @@ namespace ComicVineAI
 				if (best > match.CoverScore)
 				{
 					match.CoverScore = best;
-					match.Confidence = Combine(match.VolumeScore, best) * match.Penalty;
+					match.FromAlternate = true;
+					match.Confidence = Combine(match.VolumeScore, best) * match.Penalty * match.NumberFactor;
+					log(Loc.T("id.altCover", match.Volume?.Name, match.Issue?.Number, best.ToString("P0")));
 					if (bestCover != null)
 					{
 						CandidateCompared?.Invoke(match, bestCover);
@@ -474,21 +657,66 @@ namespace ComicVineAI
 		}
 
 		/// <summary>The similarity of the cover with the image at the url, which is returned too (null if it could not be downloaded): the caller disposes it.</summary>
-		private double Similarity(CoverFingerprint cover, string url, CancellationToken token, out Bitmap image)
+		private double Similarity(CoverFingerprint cover, string url, CancellationToken token, out Bitmap image) =>
+			ScoreCover(cover, url, token, true, out image);
+
+		/// <summary>
+		/// The similarity of the cover of the book with the Comic Vine cover at the url, or -1 if that cover could not be had. Nothing is
+		/// worked out twice: the answer for this pair is remembered on disk, and so is the fingerprint of the Comic Vine cover, so a cover is
+		/// decoded and analysed once for all the books and all the runs. The image itself is only loaded when it is wanted (to show it).
+		/// </summary>
+		private double ScoreCover(CoverFingerprint cover, string url, CancellationToken token, bool wantImage, out Bitmap image)
 		{
-			image = comicVine.DownloadImage(url, token);
-			CoverFingerprint other = CoverFingerprint.From(image);
-			return other == null ? -1 : cover.Similarity(other);
+			image = null;
+			if (cover == null || string.IsNullOrEmpty(url))
+			{
+				return -1;
+			}
+			CoverStore store = comicVine.Covers;
+			if (store.TryGetScore(cover, url, out double known))
+			{
+				if (wantImage)
+				{
+					image = comicVine.DownloadImage(url, token);
+				}
+				return known;
+			}
+			CoverFingerprint other = store.GetFingerprint(url);
+			if (other == null)
+			{
+				image = comicVine.DownloadImage(url, token);
+				other = CoverFingerprint.From(image);
+				if (other != null)
+				{
+					store.PutFingerprint(url, other);
+				}
+			}
+			else if (wantImage)
+			{
+				image = comicVine.DownloadImage(url, token);
+			}
+			if (other == null)
+			{
+				return -1;
+			}
+			double score = cover.Similarity(other);
+			store.PutScore(cover, url, score);
+			if (!wantImage)
+			{
+				image?.Dispose();
+				image = null;
+			}
+			return score;
 		}
 
 		/// <summary>The cover decides when it is available; the name alone is never fully sure.</summary>
-		private static double Combine(double volumeScore, double coverScore)
+		private static double Combine(double volumeScore, double coverScore, bool distinct = false)
 		{
 			if (coverScore < 0)
 			{
 				return 0.85 * volumeScore;
 			}
-			double coverNorm = Math.Max(0, Math.Min(1, (coverScore - CoverFloor) / CoverRange));
+			double coverNorm = distinct ? 1.0 : Math.Max(0, Math.Min(1, (coverScore - CoverFloor) / CoverRange));
 			return 0.30 * volumeScore + 0.70 * coverNorm;
 		}
 
@@ -558,6 +786,9 @@ namespace ComicVineAI
 		// ---- Series remembered from earlier books ------------------------------------------------------------
 
 		/// <summary>The key of a series name as it is written in the library: the name, and the volume if the file says so.</summary>
+		/// <summary>Two books of the library have the same series (the same normalized name and volume): the books of one series.</summary>
+		public static bool SameSeries(BookHints a, BookHints b) => Keys(a).Intersect(Keys(b)).Any();
+
 		private static IEnumerable<string> Keys(BookHints hints) =>
 			hints.SeriesNames.Select(n => TextMatch.Normalize(n) + (hints.Volume > 1900 ? "|" + hints.Volume : "")).Where(k => k.Length > 0).Distinct();
 

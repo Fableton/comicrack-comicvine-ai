@@ -24,6 +24,20 @@ namespace ComicVineAI
 		private static readonly Regex stripTags = new Regex("<.*?>");
 		private static readonly Regex listOfCovers = new Regex("(?is)list of covers.*$");
 
+		/// <summary>Tag of the books whose data came from the suggestion of Claude (the research with AI of the manual review), not from Comic Vine.</summary>
+		public const string ClaudeTag = "ClaudeInfo";
+
+		/// <summary>Adds a tag to the Tags of the book if it is not there yet.</summary>
+		public static void AddTag(ComicBook book, string tag)
+		{
+			List<string> tags = Split(book.Tags).Select(t => t.Trim()).Where(t => t.Length > 0).ToList();
+			if (!tags.Any(t => string.Equals(t, tag, StringComparison.OrdinalIgnoreCase)))
+			{
+				tags.Add(tag);
+				book.Tags = JoinCleaned(tags);
+			}
+		}
+
 		public static void Write(ComicBook book, VolumeInfo volume, IssueInfo issue, WriteOptions o)
 		{
 			// ---- what Comic Vine says (cvdb.py) ----------------------------------------------------------------
@@ -132,7 +146,11 @@ namespace ComicVineAI
 			value = MassageString(o.Updates("webpage"), o.OverwriteExisting, o.IgnoreBlanks, webpage, book.Web);
 			if (value != null) { book.Web = value; }
 
-			// ---- tags and notes: the key of the issue ----------------------------------------------------------
+			// ---- tags and notes: the key of the issue (an issue typed by hand has none: it is not on Comic Vine) ----
+			if (issue.Id == 0)
+			{
+				return;
+			}
 			List<string> newTags = AddKeyToTags(Split(book.Tags), issue.Id);
 			list = MassageList(o.KeyInTags, true, false, newTags, Split(book.Tags));
 			if (list != null) { book.Tags = JoinCleaned(list); }
@@ -188,7 +206,7 @@ namespace ComicVineAI
 			return date;
 		}
 
-		private static Dictionary<string, List<string>> ParseRoles(IssueInfo issue)
+		internal static Dictionary<string, List<string>> ParseRoles(IssueInfo issue)
 		{
 			Dictionary<string, List<string>> map = new Dictionary<string, List<string>>
 			{

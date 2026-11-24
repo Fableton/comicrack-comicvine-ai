@@ -6,7 +6,11 @@
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>ComicVineAI</AssemblyName>
     <!-- the version of the plugin: shown in the windows and in the log (AppInfo) and in the name of the release zip -->
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
+    <!-- every normal build is stamped with the date and time (MMdd-HHmm) so the builds that are tried one after another can be told
+         apart in the windows and in the log; package.ps1 builds with -p:ReleaseBuild=true, which leaves the stamp out -->
+    <BuildStamp Condition="'$(ReleaseBuild)' != 'true'">$([System.DateTime]::Now.ToString('MMdd-HHmm'))</BuildStamp>
+    <InformationalVersion Condition="'$(BuildStamp)' != ''">$(Version)+$(BuildStamp)</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <RootNamespace>ComicVineAI</RootNamespace>
     <Nullable>disable</Nullable>
@@ -15,6 +19,11 @@
          Override with: dotnet build -p:ComicRackBin=... -->
     <ComicRackBin Condition="'$(ComicRackBin)' == ''">$(MSBuildThisFileDirectory)..\ComicRackCE\ComicRack\bin\Release\net48\</ComicRackBin>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- the test harness has its own project -->
+    <Compile Remove="tools\**" />
+  </ItemGroup>
 
   <ItemGroup>
     <Reference Include="ComicRack.Plugins">
@@ -46,6 +55,15 @@
 
   <ItemGroup>
     <PackageReference Include="PolySharp" Version="1.16.0" PrivateAssets="all" />
+    <!-- the log file (FileLog). Compile time only: the DLL is embedded below, not copied next to the plugin -->
+    <PackageReference Include="log4net" Version="3.6.0" ExcludeAssets="runtime" />
   </ItemGroup>
+
+  <!-- log4net goes inside ComicVineAI.dll (the plugin stays a single file); FileLog loads it from there -->
+  <Target Name="EmbedLog4net" BeforeTargets="AssignTargetPaths" DependsOnTargets="ResolveReferences">
+    <ItemGroup>
+      <EmbeddedResource Include="@(ReferencePath)" Condition="'%(Filename)' == 'log4net'" LogicalName="ComicVineAI.lib.log4net.dll" />
+    </ItemGroup>
+  </Target>
 
 </Project>

@@ -22,6 +22,8 @@ namespace ComicVineAI
 		private readonly CheckBox preferIndividual = new CheckBox { Text = Loc.T("settings.preferIndividual"), AutoSize = true };
 		private readonly CheckBox coverComparison = new CheckBox { Text = Loc.T("settings.coverComparison"), AutoSize = true };
 		private readonly CheckBox skipScraped = new CheckBox { Text = Loc.T("settings.skipScraped"), AutoSize = true };
+		private readonly CheckBox manualOnly = new CheckBox { Text = Loc.T("settings.manualOnly"), AutoSize = true };
+		private readonly CheckBox askBeforeStart = new CheckBox { Text = Loc.T("settings.askBeforeStart"), AutoSize = true };
 		private readonly ComboBox language = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
 		private readonly NumericUpDown textSize = new NumericUpDown { Minimum = 80, Maximum = 250, Increment = 10 };
 		private readonly NumericUpDown maxVolumes = new NumericUpDown { Minimum = 1, Maximum = 10 };
@@ -35,6 +37,7 @@ namespace ComicVineAI
 		private readonly CheckBox keyInTags = new CheckBox { Text = Loc.T("settings.keyInTags"), AutoSize = true };
 		private readonly CheckBox keyInNotes = new CheckBox { Text = Loc.T("settings.keyInNotes"), AutoSize = true };
 		private readonly CheckBox noteDate = new CheckBox { Text = Loc.T("settings.noteDate"), AutoSize = true };
+		private readonly CheckBox pageTypes = new CheckBox { Text = Loc.T("settings.pageTypes"), AutoSize = true };
 		private readonly TextBox aliases = new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical, AcceptsReturn = true, Dock = DockStyle.Fill };
 		private readonly TextBox imprints = new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical, AcceptsReturn = true, Dock = DockStyle.Fill };
 
@@ -42,6 +45,9 @@ namespace ComicVineAI
 		private readonly CheckBox useClaude = new CheckBox { Text = Loc.T("settings.useClaude"), AutoSize = true };
 		private readonly TextBox claudePath = new TextBox { Dock = DockStyle.Fill };
 		private readonly TextBox claudeModel = new TextBox { Dock = DockStyle.Fill };
+		private readonly CheckBox aiChrome = new CheckBox { Text = Loc.T("settings.aiChrome"), AutoSize = true };
+		private readonly NumericUpDown claudeCacheDays = new NumericUpDown { Minimum = 0, Maximum = 3650, Value = 30, Width = Ui.Px(70) };
+		private readonly Label claudeCacheStatus = new Label { AutoSize = true, MaximumSize = new Size(Ui.Px(700), 0) };
 		private readonly Label claudeStatus = new Label { AutoSize = true };
 
 		public SettingsForm(PluginSettings settings, string pluginFolder = null)
@@ -107,6 +113,8 @@ namespace ComicVineAI
 			AddWide(table, preferIndividual);
 			AddWide(table, coverComparison);
 			AddWide(table, skipScraped);
+			AddWide(table, askBeforeStart);
+			AddWide(table, manualOnly);
 			AddRow(table, Loc.T("settings.textSize"), textSize);
 			AddRow(table, Loc.T("settings.language"), language);
 			AddRow(table, Loc.T("settings.maxVolumes"), maxVolumes);
@@ -149,6 +157,7 @@ namespace ComicVineAI
 			AddWide(table, keyInTags);
 			AddWide(table, keyInNotes);
 			AddWide(table, noteDate);
+			AddWide(table, pageTypes);
 			AddBlock(table, Loc.T("settings.aliases"), aliases, Ui.Px(64));
 			AddBlock(table, Loc.T("settings.imprints"), imprints, Ui.Px(64));
 			return Page(Loc.T("settings.tab.metadata"), table);
@@ -176,7 +185,53 @@ namespace ComicVineAI
 			AddRow(table, Loc.T("settings.claudePath"), claudePath, 0, browse);
 			AddRow(table, Loc.T("settings.claudeModel"), claudeModel, 0, detect);
 			AddWide(table, claudeStatus);
+			AddWide(table, aiChrome);
+
+			Button deleteCache = new Button { Text = Loc.T("settings.claudeCacheDelete"), AutoSize = true, Enabled = pluginFolder != null };
+			deleteCache.Click += (s, e) => DeleteClaudeCache();
+			AddRow(table, Loc.T("settings.claudeCacheDays"), claudeCacheDays, 0, deleteCache);
+			AddWide(table, claudeCacheStatus);
+			UpdateClaudeCacheStatus();
 			return Page(Loc.T("settings.tab.claude"), table);
+		}
+
+		private void UpdateClaudeCacheStatus()
+		{
+			try
+			{
+				ClaudeCache.Purge(pluginFolder ?? "", 0, true, out int all, out int _);
+				claudeCacheStatus.Text = Loc.T("settings.claudeCacheStatus", all);
+			}
+			catch (Exception)
+			{
+				claudeCacheStatus.Text = "";
+			}
+		}
+
+		/// <summary>Deletes the saved answers of Claude older than the number of days of the box (0 = all), after asking.</summary>
+		private void DeleteClaudeCache()
+		{
+			int days = (int)claudeCacheDays.Value;
+			try
+			{
+				ClaudeCache.Purge(pluginFolder, days, true, out int removed, out int kept);
+				if (removed == 0)
+				{
+					claudeCacheStatus.Text = Loc.T("settings.claudeCacheNothing", kept);
+					return;
+				}
+				string question = Loc.T(days > 0 ? "settings.claudeCacheConfirmOlder" : "settings.claudeCacheConfirmAll", removed, removed + kept, days);
+				if (MessageBox.Show(this, question, Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+				{
+					return;
+				}
+				ClaudeCache.Purge(pluginFolder, days, false, out removed, out kept);
+				claudeCacheStatus.Text = Loc.T("settings.claudeCacheDone", removed, kept);
+			}
+			catch (Exception e)
+			{
+				claudeCacheStatus.Text = Loc.T("settings.claudeCacheFailed", e.Message);
+			}
 		}
 
 		private static TabPage Page(string title, TableLayoutPanel table)
@@ -244,6 +299,8 @@ namespace ComicVineAI
 			localPublishers.Text = Crlf(settings.LocalPublishers);
 			coverComparison.Checked = settings.UseCoverComparison;
 			skipScraped.Checked = settings.SkipAlreadyScraped;
+			manualOnly.Checked = settings.ManualOnly;
+			askBeforeStart.Checked = settings.AskBeforeStart;
 
 			language.Items.Add(new LanguageItem("auto", Loc.T("settings.languageAuto")));
 			foreach (string[] item in Loc.Available(pluginFolder))
@@ -265,12 +322,14 @@ namespace ComicVineAI
 			keyInTags.Checked = settings.KeyInTags;
 			keyInNotes.Checked = settings.KeyInNotes;
 			noteDate.Checked = settings.NoteScrapeDate;
+			pageTypes.Checked = settings.SetPageTypes;
 			aliases.Text = Crlf(settings.PublisherAliases);
 			imprints.Text = Crlf(settings.CustomImprints);
 
 			useClaude.Checked = settings.UseClaude;
 			claudePath.Text = settings.ClaudePath;
 			claudeModel.Text = settings.ClaudeModel;
+			aiChrome.Checked = settings.AiChromeFallback;
 			UpdateClaudeStatus();
 		}
 
@@ -333,6 +392,8 @@ namespace ComicVineAI
 			settings.LocalPublishers = localPublishers.Text;
 			settings.UseCoverComparison = coverComparison.Checked;
 			settings.SkipAlreadyScraped = skipScraped.Checked;
+			settings.ManualOnly = manualOnly.Checked;
+			settings.AskBeforeStart = askBeforeStart.Checked;
 			settings.Language = (language.SelectedItem as LanguageItem)?.Code ?? "auto";
 			settings.FontScale = (double)textSize.Value / 100.0;
 			Ui.FontScale = (float)settings.FontScale;
@@ -346,12 +407,14 @@ namespace ComicVineAI
 			settings.KeyInTags = keyInTags.Checked;
 			settings.KeyInNotes = keyInNotes.Checked;
 			settings.NoteScrapeDate = noteDate.Checked;
+			settings.SetPageTypes = pageTypes.Checked;
 			settings.PublisherAliases = aliases.Text;
 			settings.CustomImprints = imprints.Text;
 
 			settings.UseClaude = useClaude.Checked;
 			settings.ClaudePath = claudePath.Text.Trim();
 			settings.ClaudeModel = claudeModel.Text.Trim();
+			settings.AiChromeFallback = aiChrome.Checked;
 		}
 
 		private sealed class LanguageItem

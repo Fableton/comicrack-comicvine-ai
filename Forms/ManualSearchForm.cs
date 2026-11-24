@@ -1,12 +1,14 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using cYo.Projects.ComicRack.Engine;
 
 namespace ComicVineAI
 {
@@ -44,14 +46,21 @@ namespace ComicVineAI
 		private readonly Button previousPage = new Button { Text = "◀", AutoSize = true };
 		private readonly Button nextPage = new Button { Text = "▶", AutoSize = true };
 		private readonly Label issueInfo = new Label { Dock = DockStyle.Fill, AutoSize = true };
+		private readonly LinkLabel issueLink = new LinkLabel { AutoSize = true, Visible = false, Text = Loc.T("manual.openIssue"), Margin = new Padding(Ui.Px(3), 0, Ui.Px(3), Ui.Px(4)) };
 		private readonly Label status = new Label { Dock = DockStyle.Fill, AutoSize = true };
 		private readonly Button navButton = new Button { Text = Loc.T("manual.showIssues"), AutoSize = true, Enabled = false };
 		private readonly Button useButton = new Button { Text = Loc.T("manual.use"), AutoSize = true, Enabled = false };
+		private readonly Button useRestButton = new Button { AutoSize = true, Enabled = false, Visible = false };
+		private readonly Button aiButton = new Button { Text = Loc.T("manual.ai"), AutoSize = true };
+		private readonly Button editButton = new Button { Text = Loc.T("manual.edit"), AutoSize = true, Enabled = false };
+		private List<IssueMatch> candidates = new List<IssueMatch>(); // what the search found for this book, with its match percentage
 
 		private readonly CheckBox hideUnwanted = new CheckBox { Text = Loc.T("manual.hideUnwanted"), Checked = true, AutoSize = true, Anchor = AnchorStyles.Left };
 		private readonly Button previousBookButton = new Button { Text = Loc.T("manual.previousBook"), AutoSize = true };
 		private readonly Button coverButton = new Button { Text = Loc.T("manual.otherCovers"), AutoSize = true, Visible = false, Anchor = AnchorStyles.Left };
 		private readonly ContextMenuStrip volumeMenu = new ContextMenuStrip();
+		private readonly ContextMenuStrip pageMenu = new ContextMenuStrip();
+		private readonly Label pageTypeLabel = new Label { AutoSize = true, Visible = false, ForeColor = Color.DarkBlue, Margin = new Padding(Ui.Px(8), Ui.Px(7), Ui.Px(3), 0) };
 		private List<VolumeInfo> allVolumes = new List<VolumeInfo>();
 		private List<string> coverUrls; // the main cover and the alternatives of the selected issue, once they are known
 		private int coverIndex;
@@ -74,6 +83,12 @@ namespace ComicVineAI
 		/// <summary>The volume remembered for the series name of the book: it is shown selected, ready to confirm.</summary>
 		public VolumeInfo SuggestedVolume { get; set; }
 
+		/// <summary>
+		/// The suggested volume is the same one the previous book was just chosen with by hand: the issue list opens right away
+		/// (once), so the user only has to pick the number.
+		/// </summary>
+		public bool OpenIssuesForSuggested { get; set; }
+
 		/// <summary>Says if a publisher is in the list of unwanted ones.</summary>
 		public Func<string, bool> IsUnwantedPublisher { get; set; } = publisher => false;
 
@@ -90,6 +105,27 @@ namespace ComicVineAI
 		public bool CanGoBack { get; set; }
 
 		public bool CancelAll { get; private set; }
+
+		/// <summary>The types of page that the user chose with the menu of the page (page index, 0 based). They are applied to the book when it is tagged.</summary>
+		public Dictionary<int, ComicPageType> PageTypeChanges { get; } = new Dictionary<int, ComicPageType>();
+
+		/// <summary>How many of the books that are left in the review are of the same series as this one. Set by the caller; 0 hides the button.</summary>
+		public Func<int> CountRemaining { get; set; }
+
+		/// <summary>The user chose "use for the rest": after this book, the books of the same series are tagged with the number of each one.</summary>
+		public bool ApplyToRemaining { get; private set; }
+
+		/// <summary>
+		/// Asks Claude about a cover (the image, the context that the user wrote, the cancellation) and gives its answer. Set by the caller; the "research with AI" button is
+		/// only there when it is set. Runs on a worker thread.
+		/// </summary>
+		public Func<Bitmap, string, CancellationToken, ClaudeSuggestion> AskClaude { get; set; }
+
+		/// <summary>
+		/// What the user changed or typed in the edit window. When the form closes with OK and this is set, it replaces what Comic Vine says
+		/// for the selected issue; when there is no selected issue (the AI path) it is the only data and the book is not linked to Comic Vine.
+		/// </summary>
+		public ManualEdit Edit { get; private set; }
 		public VolumeInfo SelectedVolume => foundVolume;
 		public IssueInfo SelectedIssue => foundIssue;
 
@@ -113,11 +149,12 @@ namespace ComicVineAI
 			// the search starts from the best idea available: Claude, then the book itself
 			BookHints hints = result.Hints ?? new BookHints();
 			bookHints = hints;
+			candidates = result.Candidates ?? new List<IssueMatch>();
 			ClaudeSuggestion claude = result.Claude;
 			if (claude != null && claude.IsUsable)
 			{
 				series.Text = claude.Series;
-				number.Text = claude.Number;
+				number.Text = NumberToStart(bookHints, claude);
 				year.Text = claude.VolumeYear > 0 ? claude.VolumeYear.ToString() : "";
 				publisher.Text = claude.Publisher;
 			}
@@ -135,12 +172,13 @@ namespace ComicVineAI
 			volumeList.Columns.Add(Loc.T("manual.col.year"), Ui.Px(55));
 			volumeList.Columns.Add(Loc.T("manual.col.publisher"), Ui.Px(120));
 			volumeList.Columns.Add(Loc.T("manual.col.issues"), Ui.Px(55));
+			volumeList.Columns.Add(Loc.T("manual.col.match"), Ui.Px(60));
 			issueList.Columns.Add(Loc.T("manual.col.number"), Ui.Px(60));
 			issueList.Columns.Add(Loc.T("manual.col.title"), Ui.Px(220));
 			issueList.Columns.Add(Loc.T("manual.col.coverDate"), Ui.Px(100));
 			volumeList.Resize += (s, e) => FitColumns(volumeList, 0);
 			issueList.Resize += (s, e) => FitColumns(issueList, 1);
-			MakeSortable(volumeList, 1, 3);
+			MakeSortable(volumeList, 1, 3, 4);
 			MakeSortable(issueList, 0);
 
 			volumeList.SelectedIndexChanged += (s, e) => OnVolumeSelected();
@@ -153,10 +191,14 @@ namespace ComicVineAI
 			coverButton.Click += (s, e) => NextCover();
 			volumeList.ContextMenuStrip = volumeMenu;
 			volumeMenu.Opening += (s, e) => PrepareMenu(e);
+			BuildPageMenu();
 			hideUnwanted.CheckedChanged += (s, e) => ShowVolumes(allVolumes);
 			backButton.Click += (s, e) => LeaveIssues();
 			searchButton.Click += (s, e) => Search();
 			useButton.Click += (s, e) => UseIssue();
+			useRestButton.Click += (s, e) => UseForRemaining();
+			aiButton.Click += (s, e) => ResearchWithAi();
+			editButton.Click += (s, e) => EditSelected();
 			AcceptButton = searchButton;
 			number.Leave += (s, e) =>
 			{
@@ -186,6 +228,10 @@ namespace ComicVineAI
 			Shown += (s, e) =>
 			{
 				useCoverButton.Visible = Rescan != null; // set by the caller after the window is built
+				aiButton.Visible = AskClaude != null;
+				int remaining = CountRemaining?.Invoke() ?? 0;
+				useRestButton.Text = Loc.T("manual.useRest", remaining);
+				useRestButton.Visible = remaining > 0;
 				previousBookButton.Enabled = CanGoBack;
 				GoToPage(0);
 				if (SuggestedVolume != null)
@@ -257,13 +303,16 @@ namespace ComicVineAI
 			listHost.Controls.Add(volumeList);
 			listHost.Controls.Add(issuesPanel);
 
-			TableLayoutPanel right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+			TableLayoutPanel right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
 			right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+			right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 			right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 			right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 			right.Controls.Add(issueView, 0, 0);
 			right.Controls.Add(coverButton, 0, 1);
 			right.Controls.Add(issueInfo, 0, 2);
+			right.Controls.Add(issueLink, 0, 3);
+			issueLink.LinkClicked += (s, e) => OpenIssuePage();
 			right.Resize += (s, e) => issueInfo.MaximumSize = new Size(Math.Max(Ui.Px(120), right.ClientSize.Width - Ui.Px(8)), 0); // long names wrap instead of being cut
 
 			SplitContainer inner = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical };
@@ -277,9 +326,9 @@ namespace ComicVineAI
 			UiState.AttachSplitter(this, inner, "manual.volumes", 460, 240, 170);
 
 			// buttons
-			TableLayoutPanel bottom = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, RowCount = 1, AutoSize = true };
+			TableLayoutPanel bottom = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 9, RowCount = 1, AutoSize = true };
 			bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-			for (int i = 0; i < 5; i++)
+			for (int i = 0; i < 8; i++)
 			{
 				bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 			}
@@ -288,10 +337,13 @@ namespace ComicVineAI
 			stop.Click += (s, e) => { CancelAll = true; DialogResult = DialogResult.Cancel; };
 			bottom.Controls.Add(status, 0, 0);
 			bottom.Controls.Add(previousBookButton, 1, 0);
-			bottom.Controls.Add(navButton, 2, 0);
-			bottom.Controls.Add(useButton, 3, 0);
-			bottom.Controls.Add(skip, 4, 0);
-			bottom.Controls.Add(stop, 5, 0);
+			bottom.Controls.Add(aiButton, 2, 0);
+			bottom.Controls.Add(editButton, 3, 0);
+			bottom.Controls.Add(navButton, 4, 0);
+			bottom.Controls.Add(useButton, 5, 0);
+			bottom.Controls.Add(useRestButton, 6, 0);
+			bottom.Controls.Add(skip, 7, 0);
+			bottom.Controls.Add(stop, 8, 0);
 			root.Controls.Add(bottom, 0, 3);
 
 			Controls.Add(root);
@@ -346,6 +398,7 @@ namespace ComicVineAI
 			bar.Controls.Add(actual);
 			bar.Controls.Add(useCoverButton);
 			bar.Controls.Add(coverPageLabel);
+			bar.Controls.Add(pageTypeLabel);
 			return bar;
 		}
 
@@ -398,8 +451,8 @@ namespace ComicVineAI
 				{
 					return 0;
 				}
-				string x = ((ListViewItem)a).SubItems[Column].Text;
-				string y = ((ListViewItem)b).SubItems[Column].Text;
+				string x = ((ListViewItem)a).SubItems[Column].Text.TrimEnd('%', ' ');
+				string y = ((ListViewItem)b).SubItems[Column].Text.TrimEnd('%', ' ');
 				int result;
 				if (numeric.Contains(Column) && double.TryParse(TextMatch.NormalizeNumber(x), NumberStyles.Float, CultureInfo.InvariantCulture, out double dx) && double.TryParse(TextMatch.NormalizeNumber(y), NumberStyles.Float, CultureInfo.InvariantCulture, out double dy))
 				{
@@ -438,6 +491,7 @@ namespace ComicVineAI
 					bookFingerprint = CoverFingerprint.From(page);
 				}
 				pageBox.Value = Math.Min(pageBox.Maximum, index + 1);
+				ShowPageType();
 				firstPage.Enabled = previousPage.Enabled = index > 0;
 				nextPage.Enabled = pageCount == 0 || index < pageCount - 1;
 				lastPage.Enabled = pageCount > 0 && index < pageCount - 1; // the last page is only known when the comic says how many it has
@@ -446,6 +500,91 @@ namespace ComicVineAI
 			finally
 			{
 				loadingPage = false;
+			}
+		}
+
+		/// <summary>The menu of the image of the comic: the type of the page on screen, and copying the image.</summary>
+		private void BuildPageMenu()
+		{
+			ToolStripMenuItem types = new ToolStripMenuItem(Loc.T("manual.pageTypeMenu"));
+			foreach (ComicPageType type in PageTypes.Choices)
+			{
+				ComicPageType chosen = type;
+				ToolStripMenuItem item = new ToolStripMenuItem(PageTypeName(type)) { Tag = type };
+				item.Click += (s, e) =>
+				{
+					PageTypeChanges[currentPage] = chosen;
+					ShowPageType();
+				};
+				types.DropDownItems.Add(item);
+			}
+			ToolStripMenuItem copy = new ToolStripMenuItem(Loc.T("manual.copyImage"));
+			copy.Click += (s, e) => CopyPageImage();
+			pageMenu.Items.Add(types);
+			pageMenu.Items.Add(copy);
+			pageMenu.Opening += (s, e) =>
+			{
+				bool hasPage = bookView.Image != null;
+				types.Enabled = hasPage;
+				copy.Enabled = hasPage;
+				ComicPageType now = CurrentPageType();
+				foreach (ToolStripMenuItem item in types.DropDownItems)
+				{
+					item.Checked = (ComicPageType)item.Tag == now;
+				}
+			};
+			bookView.ContextMenuStrip = pageMenu;
+		}
+
+		/// <summary>What the user chose for the page on screen; a story page when nothing was chosen (that is what the book gets).</summary>
+		private ComicPageType CurrentPageType() =>
+			PageTypeChanges.TryGetValue(currentPage, out ComicPageType type) ? type : ComicPageType.Story;
+
+		/// <summary>Says next to the page buttons that the page has a type other than a story page.</summary>
+		private void ShowPageType()
+		{
+			ComicPageType type = CurrentPageType();
+			pageTypeLabel.Text = Loc.T("manual.pageType", PageTypeName(type));
+			pageTypeLabel.Visible = type != ComicPageType.Story;
+		}
+
+		private static string PageTypeName(ComicPageType type)
+		{
+			switch (type)
+			{
+				case ComicPageType.FrontCover: return Loc.T("pagetype.frontCover");
+				case ComicPageType.InnerCover: return Loc.T("pagetype.innerCover");
+				case ComicPageType.Roundup: return Loc.T("pagetype.roundup");
+				case ComicPageType.Advertisement: return Loc.T("pagetype.advertisement");
+				case ComicPageType.Editorial: return Loc.T("pagetype.editorial");
+				case ComicPageType.Letters: return Loc.T("pagetype.letters");
+				case ComicPageType.Preview: return Loc.T("pagetype.preview");
+				case ComicPageType.BackCover: return Loc.T("pagetype.backCover");
+				case ComicPageType.Other: return Loc.T("pagetype.other");
+				case ComicPageType.Deleted: return Loc.T("pagetype.deleted");
+				default: return Loc.T("pagetype.story");
+			}
+		}
+
+		/// <summary>Puts the page on screen in the clipboard as an image.</summary>
+		private void CopyPageImage()
+		{
+			Bitmap page = bookView.Image;
+			if (page == null)
+			{
+				return;
+			}
+			try
+			{
+				using (Bitmap copy = new Bitmap(page))
+				{
+					Clipboard.SetImage(copy);
+				}
+				status.Text = Loc.T("manual.imageCopied", currentPage + 1);
+			}
+			catch (Exception e)
+			{
+				status.Text = Loc.T("manual.copyFailed", e.Message); // the clipboard can be locked by another program
 			}
 		}
 
@@ -509,16 +648,28 @@ namespace ComicVineAI
 			});
 		}
 
+		/// <summary>
+		/// The number to start the search with. The number of the book (file name or library data) wins over the one of Claude when there
+		/// is one: Claude reads a cover that can be cropped and has mixed up "Chapter Two" with "Chapter One"; the name of the file is
+		/// what the user wrote. Claude's note about it stays on screen.
+		/// </summary>
+		private static string NumberToStart(BookHints hints, ClaudeSuggestion claude)
+		{
+			string own = (hints?.Number ?? "").Trim().TrimStart('#').Trim();
+			return own.Length > 0 ? own : claude.Number;
+		}
+
 		private void ApplyRescan(IdentifyResult found)
 		{
 			useCoverButton.Enabled = true;
 			searchButton.Enabled = true;
 			knownLabel.Text = KnownText(bookHints, found);
+			candidates = found.Candidates ?? new List<IssueMatch>();
 			ClaudeSuggestion claude = found.Claude;
 			if (claude != null && claude.IsUsable)
 			{
 				series.Text = claude.Series;
-				number.Text = claude.Number;
+				number.Text = NumberToStart(bookHints, claude);
 				year.Text = claude.VolumeYear > 0 ? claude.VolumeYear.ToString() : "";
 				publisher.Text = claude.Publisher;
 			}
@@ -593,6 +744,8 @@ namespace ComicVineAI
 			item.SubItems.Add(v.StartYear > 0 ? v.StartYear.ToString() : "");
 			item.SubItems.Add(v.Publisher);
 			item.SubItems.Add(v.IssueCount.ToString());
+			IssueMatch best = candidates.Where(c => c.Volume != null && c.Volume.Id == v.Id).OrderByDescending(c => c.Confidence).FirstOrDefault();
+			item.SubItems.Add(best == null ? "" : best.Confidence.ToString("P0"));
 			return item;
 		}
 
@@ -619,6 +772,11 @@ namespace ComicVineAI
 			{
 				ListViewItem suggested = SuggestedVolume == null ? null : volumeList.Items.Cast<ListViewItem>().FirstOrDefault(i => ((VolumeInfo)i.Tag).Id == SuggestedVolume.Id);
 				(suggested ?? volumeList.Items[0]).Selected = true;
+				if (suggested != null && OpenIssuesForSuggested && !inIssues)
+				{
+					OpenIssuesForSuggested = false; // only the first time: "back to series" must stay in the series list
+					EnterIssues();
+				}
 			}
 		}
 
@@ -842,6 +1000,8 @@ namespace ComicVineAI
 			coverIndex = 0;
 			coverButton.Visible = false;
 			useButton.Enabled = false;
+			useRestButton.Enabled = false;
+			editButton.Enabled = false;
 			issueView.Image = null;
 		}
 
@@ -853,6 +1013,8 @@ namespace ComicVineAI
 			coverIndex = 0;
 			coverButton.Visible = false;
 			useButton.Enabled = issue != null;
+			useRestButton.Enabled = issue != null;
+			editButton.Enabled = issue != null;
 			issueView.Image = image; // the view owns the image
 			UpdateInfo();
 		}
@@ -1019,6 +1181,7 @@ namespace ComicVineAI
 		private void UpdateInfo()
 		{
 			similarity = -1;
+			issueLink.Visible = foundIssue != null && IsWebAddress(foundIssue.SiteUrl);
 			if (foundIssue != null && issueView.Image != null && bookFingerprint != null)
 			{
 				similarity = bookFingerprint.Similarity(CoverFingerprint.From(issueView.Image));
@@ -1029,9 +1192,218 @@ namespace ComicVineAI
 				issueInfo.Text = shown == null ? "" : VolumeText(shown);
 				return;
 			}
+			IssueMatch candidate = candidates.Where(c => c.Issue != null && c.Issue.Id == foundIssue.Id).OrderByDescending(c => c.Confidence).FirstOrDefault();
 			issueInfo.Text = $"{foundVolume.Name} ({foundVolume.StartYear}) #{foundIssue.Number}\r\n{foundIssue.Name}\r\n{Loc.T("manual.coverDate", foundIssue.CoverDate)}\r\n{foundVolume.Publisher}\r\n" +
+				(candidate == null ? Loc.T("manual.matchNone") : Loc.T("manual.match", candidate.Confidence.ToString("P0"), candidate.NameScore.ToString("P0"), candidate.CoverScore < 0 ? Loc.T("common.na") : candidate.CoverScore.ToString("P0"))) + "\r\n" +
 				(similarity >= 0 ? Loc.T("manual.similarity", currentPage + 1, similarity.ToString("P0")) : Loc.T("manual.similarityNA")) +
 				(coverUrls != null && coverUrls.Count > 1 ? "\r\n" + Loc.T("manual.coverNumber", coverIndex + 1, coverUrls.Count) : "");
+		}
+
+		/// <summary>
+		/// "Research with AI": Claude looks at the page on screen (the user can go to the real cover first) and its answer is shown in the edit
+		/// window, to be corrected before it is sent. The book is written with those values only; it is not linked to a Comic Vine issue.
+		/// </summary>
+		private void ResearchWithAi()
+		{
+			if (AskClaude == null)
+			{
+				return;
+			}
+			string context;
+			using (AiContextForm ask = new AiContextForm(settings.AiChromeFallback))
+			{
+				if (ask.ShowDialog(this) != DialogResult.OK)
+				{
+					return;
+				}
+				context = ask.Context;
+			}
+			Bitmap cover = getPage?.Invoke(currentPage); // read here, on the UI thread
+			if (cover == null)
+			{
+				status.Text = Loc.T("manual.pageUnreadable", currentPage + 1);
+				return;
+			}
+			aiButton.Enabled = false;
+			status.Text = Loc.T("manual.aiWorking", currentPage + 1);
+			CancellationToken token = cancellation.Token;
+			Task.Run(() =>
+			{
+				try
+				{
+					ClaudeSuggestion suggestion = AskClaude(cover, context, token);
+					OnUi(() => ShowAiSuggestion(suggestion));
+				}
+				catch (OperationCanceledException)
+				{
+				}
+				catch (Exception e)
+				{
+					OnUi(() =>
+					{
+						aiButton.Enabled = true;
+						status.Text = Loc.T("manual.aiFailed", e.Message);
+					});
+				}
+				finally
+				{
+					cover.Dispose();
+				}
+			});
+		}
+
+		private void ShowAiSuggestion(ClaudeSuggestion suggestion)
+		{
+			aiButton.Enabled = true;
+			if (suggestion == null || !suggestion.IsUsable)
+			{
+				status.Text = Loc.T("manual.aiNone");
+				return;
+			}
+			status.Text = "";
+			ManualEdit start = new ManualEdit
+			{
+				Series = suggestion.Series,
+				Number = suggestion.Number,
+				Title = suggestion.Title,
+				Year = suggestion.VolumeYear > 0 ? suggestion.VolumeYear : suggestion.Year,
+				Publisher = suggestion.Publisher,
+				Writer = suggestion.Writer, Penciller = suggestion.Penciller, Inker = suggestion.Inker, Colorist = suggestion.Colorist,
+				Letterer = suggestion.Letterer, CoverArtist = suggestion.CoverArtist, Editor = suggestion.Editor,
+				CoverDate = suggestion.CoverDate, StoreDate = suggestion.StoreDate, Summary = suggestion.Summary,
+				Characters = suggestion.Characters, Teams = suggestion.Teams, Locations = suggestion.Locations, StoryArcs = suggestion.StoryArcs,
+				Web = suggestion.SourceUrl
+			};
+			string heading = Loc.T("edit.fromAi", suggestion.Confidence.ToString("P0"));
+			using (EditMetadataForm form = new EditMetadataForm(Loc.T("edit.titleAi"), heading, suggestion.Notes, start, extended: true))
+			{
+				if (form.ShowDialog(this) == DialogResult.OK && form.Result != null)
+				{
+					Edit = form.Result;
+					foundVolume = null; // nothing of Comic Vine goes with this: the values are the ones of the user
+					foundIssue = null;
+					DialogResult = DialogResult.OK;
+				}
+			}
+		}
+
+		/// <summary>"Edit data": the data of the selected Comic Vine issue, to change what is needed before it is sent (the number "1-2", for example).</summary>
+		private void EditSelected()
+		{
+			if (foundIssue == null || foundVolume == null)
+			{
+				return;
+			}
+			IssueInfo issue = foundIssue;
+			VolumeInfo volume = foundVolume;
+			if (issue.HasDetails)
+			{
+				ShowEditWindow(volume, issue);
+				return;
+			}
+			// the creators, summary and lists are in the details of the issue (one call, which the write needs anyway)
+			CancellationToken token = cancellation.Token;
+			editButton.Enabled = false;
+			status.Text = Loc.T("manual.loadingDetails");
+			Task.Run(() =>
+			{
+				string error = null;
+				try
+				{
+					comicVine.LoadDetails(issue, token);
+				}
+				catch (OperationCanceledException)
+				{
+					return;
+				}
+				catch (Exception e)
+				{
+					error = e.Message;
+				}
+				OnUi(() =>
+				{
+					status.Text = "";
+					editButton.Enabled = foundIssue != null;
+					if (error != null)
+					{
+						status.Text = Loc.T("manual.detailsFailed", error);
+					}
+					if (foundIssue == issue)
+					{
+						ShowEditWindow(volume, issue); // without details the fields come empty, but the number can still be corrected
+					}
+				});
+			});
+		}
+
+		private void ShowEditWindow(VolumeInfo volume, IssueInfo issue)
+		{
+			Dictionary<string, List<string>> roles = MetadataWriter.ParseRoles(issue);
+			Func<string, string> names = key => string.Join(", ", roles[key].Distinct());
+			ManualEdit start = new ManualEdit
+			{
+				FromComicVine = true,
+				Series = volume.Name,
+				Number = issue.Number,
+				Title = issue.Name ?? "",
+				Year = volume.StartYear,
+				Publisher = volume.Publisher ?? "",
+				Writer = names("writers"), Penciller = names("pencillers"), Inker = names("inkers"), Colorist = names("colorists"),
+				Letterer = names("letterers"), CoverArtist = names("cover_artists"), Editor = names("editors"),
+				CoverDate = issue.CoverDate ?? "", StoreDate = issue.StoreDate ?? "",
+				Summary = MetadataWriter.ParseSummary(issue.Description),
+				Characters = string.Join(", ", issue.Characters), Teams = string.Join(", ", issue.Teams),
+				Locations = string.Join(", ", issue.Locations), StoryArcs = string.Join(", ", issue.StoryArcs),
+				Web = issue.SiteUrl ?? ""
+			};
+			using (EditMetadataForm form = new EditMetadataForm(Loc.T("edit.titleCv"), Loc.T("edit.fromCv", volume.Name, issue.Number), "", start, extended: true))
+			{
+				if (form.ShowDialog(this) == DialogResult.OK && form.Result != null)
+				{
+					form.Result.FromComicVine = true;
+					Edit = form.Result;
+					DialogResult = DialogResult.OK;
+				}
+			}
+		}
+
+		private static bool IsWebAddress(string url) =>
+			Uri.TryCreate(url ?? "", UriKind.Absolute, out Uri uri) && (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp);
+
+		/// <summary>Opens the page of the selected issue on Comic Vine in the browser.</summary>
+		private void OpenIssuePage()
+		{
+			if (foundIssue == null || !IsWebAddress(foundIssue.SiteUrl))
+			{
+				return;
+			}
+			try
+			{
+				Process.Start(new ProcessStartInfo(foundIssue.SiteUrl) { UseShellExecute = true });
+			}
+			catch (Exception e)
+			{
+				status.Text = Loc.T("manual.openIssueFailed", e.Message);
+			}
+		}
+
+		/// <summary>
+		/// "Use for the rest": this issue is used for this book and its series for the other books of the review that are of the same series,
+		/// each with its own number. Saves clicking through them one by one when the series is right.
+		/// </summary>
+		private void UseForRemaining()
+		{
+			if (foundIssue == null || foundVolume == null)
+			{
+				return;
+			}
+			int remaining = CountRemaining?.Invoke() ?? 0;
+			if (MessageBox.Show(this, Loc.T("manual.useRestConfirm", remaining, foundVolume.Name, foundVolume.StartYear), Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+			{
+				return;
+			}
+			ApplyToRemaining = true;
+			DialogResult = DialogResult.OK;
 		}
 
 		private void UseIssue()

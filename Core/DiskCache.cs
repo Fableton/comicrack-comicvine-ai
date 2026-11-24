@@ -87,5 +87,43 @@ namespace ComicVineAI
 			{
 			}
 		}
+
+		/// <summary>The folder of the cache (other caches of the plugin keep their files next to these).</summary>
+		public string Folder => folder;
+
+		/// <summary>True when the image of this url is already on disk (without reading it).</summary>
+		public bool HasImage(string key) => File.Exists(PathFor(key, ".img"));
+
+		public bool HasBlob(string key, string extension) => File.Exists(PathFor(key, extension));
+
+		/// <summary>A binary value that never expires (the fingerprint of a cover).</summary>
+		public bool TryGetBlob(string key, string extension, out byte[] bytes)
+		{
+			bytes = null;
+			try
+			{
+				string file = PathFor(key, extension);
+				if (File.Exists(file))
+				{
+					bytes = File.ReadAllBytes(file);
+					return true;
+				}
+			}
+			catch (IOException)
+			{
+			}
+			return false;
+		}
+
+		public void PutBlob(string key, string extension, byte[] bytes)
+		{
+			try
+			{
+				File.WriteAllBytes(PathFor(key, extension), bytes);
+			}
+			catch (IOException)
+			{
+			}
+		}
 	}
 }

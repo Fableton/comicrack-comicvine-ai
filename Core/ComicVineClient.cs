@@ -270,6 +270,57 @@ namespace ComicVineAI
 			issue.HasDetails = true;
 		}
 
+		/// <summary>Fingerprints and similarities of covers already worked out (see CoverStore). Lives in the same folder as the images.</summary>
+		public CoverStore Covers => covers ?? (covers = new CoverStore(cache));
+		private CoverStore covers;
+
+		/// <summary>
+		/// The alternative covers of an issue when they cost nothing: the details are already loaded, or they come from the local database.
+		/// False when only an API call would give them (the caller decides if it is worth it).
+		/// </summary>
+		public bool LoadAlternatesFree(IssueInfo issue)
+		{
+			if (issue.HasDetails)
+			{
+				return true;
+			}
+			if (issue.Local && localDb != null && localDb.LoadDetails(issue))
+			{
+				CountLocal();
+				return true;
+			}
+			return false;
+		}
+
+		/// <summary>Puts the image on disk without decoding it, so that several can be fetched at once. Failures are ignored here: DownloadImage reports them if the image is really needed.</summary>
+		public void PrefetchImage(string url, CancellationToken token)
+		{
+			if (string.IsNullOrEmpty(url) || cache.HasImage(url))
+			{
+				return;
+			}
+			try
+			{
+				token.ThrowIfCancellationRequested();
+				HttpWebRequest request = CreateRequest(url);
+				request.ServicePoint.ConnectionLimit = Math.Max(request.ServicePoint.ConnectionLimit, 6); // the default is 2 per host
+				using (WebResponse response = request.GetResponse())
+				using (Stream stream = response.GetResponseStream())
+				using (MemoryStream copy = new MemoryStream())
+				{
+					stream.CopyTo(copy);
+					cache.PutBytes(url, copy.ToArray());
+				}
+			}
+			catch (OperationCanceledException)
+			{
+				throw;
+			}
+			catch (Exception)
+			{
+			}
+		}
+
 		/// <summary>Downloads an image (cached on disk forever, they do not change). Null on failure. Images are not API calls.</summary>
 		public Bitmap DownloadImage(string url, CancellationToken token)
 		{

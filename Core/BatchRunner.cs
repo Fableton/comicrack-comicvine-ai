@@ -32,14 +32,19 @@ namespace ComicVineAI
 		private ComicVineClient comicVine;
 		private WriteOptions options;
 		private LocalDb localDb;
-		private readonly HashSet<IdentifyResult> taggedInReview = new HashSet<IdentifyResult>(); // so a book that is tagged twice is counted once
+		private readonly bool? manualOverride;
+		private bool ManualMode => manualOverride ?? settings.ManualOnly; // not copied into the settings: they are saved from here (unwanted publishers)
+		private int lastManualVolumeId; // the volume of the last book chosen by hand: the next one with the same series opens on its issue list
+		private readonly HashSet<IdentifyResult> taggedInReview =new HashSet<IdentifyResult>(); // so a book that is tagged twice is counted once
 		private readonly Dictionary<IdentifyResult, CoverFingerprint> fingerprints = new Dictionary<IdentifyResult, CoverFingerprint>(); // each cover is read once
 		private Identifier identifier;
 		private int currentIndex;
 		private int tagged, skipped, review;
 
-		public BatchRunner(IWin32Window owner, IApplication app, PluginSettings settings, string pluginFolder, Action<string> consoleLog)
+		/// <param name="manualOverride">true = every book goes to the manual review, false = automatic, null = what the settings say. For this run only.</param>
+		public BatchRunner(IWin32Window owner, IApplication app, PluginSettings settings, string pluginFolder, Action<string> consoleLog, bool? manualOverride = null)
 		{
+			this.manualOverride = manualOverride;
 			this.owner = owner;
 			this.app = app;
 			this.settings = settings;
@@ -50,6 +55,7 @@ namespace ComicVineAI
 		/// <summary>Call on the UI thread. Returns when the progress window is closed.</summary>
 		public void Run(ComicBook[] books)
 		{
+			FileLog.Start(pluginFolder);
 			form = new ProgressForm(settings.AcceptThreshold);
 			options = WriteOptions.Load(settings);
 			DiskCache cache = new DiskCache(Path.Combine(pluginFolder, "cache"), settings.CacheDays);
@@ -86,6 +92,7 @@ namespace ComicVineAI
 		private void Log(string message)
 		{
 			form?.Log(message);
+			FileLog.Write(message);
 			consoleLog?.Invoke(message);
 		}
 
@@ -128,7 +135,7 @@ namespace ComicVineAI
 							Log(Loc.T("batch.skipped", name, result.Message));
 							form.EndBook(i, Outcome.Skipped, "", Loc.T("batch.skippedStatus", result.Message), -1, null);
 						}
-						else if (result.Accepted)
+						else if (result.Accepted && !ManualMode)
 						{
 							// once it is accepted the book is finished even if the user cancels now
 							Apply(book, result.Best, CancellationToken.None);
@@ -140,9 +147,9 @@ namespace ComicVineAI
 						{
 							deferred.Add(result);
 							review++;
-							Log(Loc.T("batch.notSure", name, result.Message));
+							Log(Loc.T(result.Accepted ? "batch.manualOnlyLog" : "batch.notSure", name, result.Message)); // accepted but manual mode is on: the user decides
 							string guess = result.Best == null ? Loc.T("batch.noCandidate") : Loc.T("batch.bestGuess", Title(result.Best));
-							form.EndBook(i, Outcome.Review, guess, Loc.T("batch.needsHelp", ClaudeNote(result)), result.Best?.Confidence ?? -1, IssueCover(result.Best, CancellationToken.None));
+							form.EndBook(i, Outcome.Review, guess, Loc.T(result.Accepted ? "batch.manualOnlyStatus" : "batch.needsHelp", ClaudeNote(result)), result.Best?.Confidence ?? -1, IssueCover(result.Best, CancellationToken.None));
 						}
 						processed = i + 1;
 					}
@@ -259,7 +266,11 @@ namespace ComicVineAI
 			settings.LocalPublishers = string.Join("\r\n", lines);
 			try
 			{
-				settings.Save(pluginFolder);
+				// Only the list is saved: the file is read again and changed, not written from the settings of this run, which can hold
+				// values that are for this run only (the book information dialog turns SkipAlreadyScraped off).
+				PluginSettings stored = PluginSettings.Load(pluginFolder);
+				stored.LocalPublishers = settings.LocalPublishers;
+				stored.Save(pluginFolder);
 			}
 			catch (IOException)
 			{
@@ -286,9 +297,16 @@ namespace ComicVineAI
 				using (ManualSearchForm manual = new ManualSearchForm(Describe(book), result, page => SafePage(book, page), book.PageCount, comicVine, settings))
 				{
 					manual.CanGoBack = index > 0;
+					manual.CountRemaining = () => RemainingOfSeries(deferred, index, result.Hints).Count;
 					manual.IsUnwantedPublisher = IsUnwanted;
 					manual.SetUnwantedPublisher = SetUnwanted;
-					manual.SuggestedVolume = identifier.SuggestedVolumeFor(result.Hints);
+					manual.SuggestedVolume = identifier.SuggestedVolumeFor(result.Hints) ?? (ManualMode ? result.Best?.Volume : null);
+					if (settings.UseClaude)
+					{
+						// "research with AI": the cover goes to Claude only when the user turned Claude on and asks for it
+						manual.AskClaude = (page, context, token) => ClaudeCli.WithFileNumber(ClaudeCli.Research(page, result.Hints, context, settings, Log, token), result.Hints);
+					}
+					manual.OpenIssuesForSuggested = manual.SuggestedVolume != null && manual.SuggestedVolume.Id == lastManualVolumeId;
 					manual.Rescan = (page, progress, token) =>
 					{
 						statusSink = progress;
@@ -309,22 +327,44 @@ namespace ComicVineAI
 						goingBack = true; // and it is shown even if it was tagged
 						continue;
 					}
-					if (answer == DialogResult.OK && manual.SelectedIssue != null)
+					if (answer == DialogResult.OK && (manual.SelectedIssue != null || manual.Edit != null))
 					{
 						try
 						{
 							IssueMatch match = new IssueMatch { Volume = manual.SelectedVolume, Issue = manual.SelectedIssue, Source = "manual" };
-							comicVine.LoadDetails(match.Issue, CancellationToken.None);
-							MetadataWriter.Write(book, match.Volume, match.Issue, options);
-							identifier.Accept(result.Hints, match.Volume); // what this choice tells about the series is used for the books that are left
+							if (match.Issue != null)
+							{
+								comicVine.LoadDetails(match.Issue, CancellationToken.None);
+							}
+							// what the user typed replaces what Comic Vine says, on a copy (the originals are cached); without an issue
+							// (the AI path) the typed values are all there is and the book is not linked to Comic Vine (id 0)
+							IssueMatch written = ApplyEdit(match, manual.Edit);
+							MetadataWriter.Write(book, written.Volume, written.Issue, options);
+							PageTypes.Apply(book, -1, manual.PageTypeChanges, settings.SetPageTypes); // by hand: every page is a story page, the user changes the others
+							if (match.Issue == null)
+							{
+								MetadataWriter.AddTag(book, MetadataWriter.ClaudeTag); // made from the suggestion of Claude, not from a Comic Vine issue
+							}
+							if (match.Volume != null)
+							{
+								identifier.Accept(result.Hints, match.Volume); // what this choice tells about the series is used for the books that are left
+								lastManualVolumeId = match.Volume.Id;
+							}
 							if (taggedInReview.Add(result))
 							{
 								tagged++;
 								review--;
 							}
-							Log(Loc.T("batch.taggedManually", Describe(book), match.Volume.Name, match.Issue.Number));
-							form.EndBook(result.Index, Outcome.Tagged, Title(match), Loc.T("batch.taggedManuallyStatus"), -1, IssueCover(match, CancellationToken.None));
-							ReanalyzeRemaining(deferred, index);
+							Log(Loc.T("batch.taggedManually", Describe(book), written.Volume.Name, written.Issue.Number));
+							form.EndBook(result.Index, Outcome.Tagged, Title(written), Loc.T("batch.taggedManuallyStatus"), -1, written.Issue.Id == 0 ? null : IssueCover(written, CancellationToken.None));
+							if (match.Volume != null)
+							{
+								ReanalyzeRemaining(deferred, index);
+								if (manual.ApplyToRemaining)
+								{
+									TagRemainingOfSeries(deferred, index, result.Hints, match.Volume);
+								}
+							}
 						}
 						catch (Exception e)
 						{
@@ -343,6 +383,143 @@ namespace ComicVineAI
 				}
 				index++;
 			}
+		}
+
+		private static List<string> SplitNames(string text) =>
+			(text ?? "").Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(n => n.Trim()).Where(n => n.Length > 0).ToList();
+
+		private static void AddCredits(IssueInfo issue, string names, string role)
+		{
+			foreach (string name in SplitNames(names))
+			{
+				Credit existing = issue.Persons.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+				if (existing == null)
+				{
+					issue.Persons.Add(new Credit { Name = name, Role = role });
+				}
+				else if (!(existing.Role ?? "").Split(',').Select(r => r.Trim()).Contains(role))
+				{
+					// the same person in another role: the copy of the credit is changed, not the cached one
+					issue.Persons[issue.Persons.IndexOf(existing)] = new Credit { Name = existing.Name, Role = string.IsNullOrEmpty(existing.Role) ? role : existing.Role + ", " + role };
+				}
+			}
+		}
+
+		/// <summary>The books that are left in the review (after the current one, not tagged yet) that are of the same series as the hints.</summary>
+		private List<IdentifyResult> RemainingOfSeries(List<IdentifyResult> deferred, int current, BookHints hints)
+		{
+			List<IdentifyResult> found = new List<IdentifyResult>();
+			for (int j = current + 1; j < deferred.Count; j++)
+			{
+				if (!taggedInReview.Contains(deferred[j]) && deferred[j].Hints != null && Identifier.SameSeries(hints, deferred[j].Hints))
+				{
+					found.Add(deferred[j]);
+				}
+			}
+			return found;
+		}
+
+		/// <summary>
+		/// "Use for the rest": the other books of the review that are of the same series are tagged with this volume, each with the number
+		/// of its own (the one of the file name when it is beyond doubt, otherwise the only number the book has). The cover is not checked:
+		/// the user has said that the series is right. A book without a clear number, or whose number is not in the volume, stays in the
+		/// review. Runs on the UI thread.
+		/// </summary>
+		private void TagRemainingOfSeries(List<IdentifyResult> deferred, int current, BookHints hints, VolumeInfo volume)
+		{
+			List<IdentifyResult> rest = RemainingOfSeries(deferred, current, hints);
+			int done = 0;
+			foreach (IdentifyResult other in rest)
+			{
+				ComicBook book = other.Book;
+				string name = Describe(book);
+				try
+				{
+					string number = FileNameParser.ExplicitNumber(other.Hints.FileName);
+					if (number.Length == 0)
+					{
+						List<string> numbers = other.Hints.Numbers.Select(n => TextMatch.NormalizeNumber(n)).Distinct().ToList();
+						number = numbers.Count == 1 ? other.Hints.Numbers[0] : "";
+					}
+					if (number.Length == 0)
+					{
+						Log(Loc.T("batch.restNoNumber", name));
+						continue;
+					}
+					comicVine.Context = name;
+					IssueInfo issue = comicVine.FindIssue(volume, number, CancellationToken.None);
+					if (issue == null)
+					{
+						Log(Loc.T("batch.restNotFound", name, number, volume.Name));
+						continue;
+					}
+					comicVine.LoadDetails(issue, CancellationToken.None);
+					MetadataWriter.Write(book, volume, issue, options);
+					PageTypes.Apply(book, -1, null, settings.SetPageTypes);
+					if (taggedInReview.Add(other))
+					{
+						tagged++;
+						review--;
+					}
+					done++;
+					IssueMatch match = new IssueMatch { Volume = volume, Issue = issue, Source = "manual" };
+					Log(Loc.T("batch.restTagged", name, volume.Name, issue.Number));
+					form.EndBook(other.Index, Outcome.Tagged, Title(match), Loc.T("batch.taggedManuallyStatus"), -1, IssueCover(match, CancellationToken.None));
+					Counters();
+				}
+				catch (Exception e)
+				{
+					Log(Loc.T("batch.couldNotTag", name, e.Message)); // it stays in the review
+				}
+			}
+			Log(Loc.T("batch.restDone", done, rest.Count));
+		}
+
+		/// <summary>The volume and issue that are written: the chosen ones with the values of the edit window on top, or just those values.</summary>
+		private static IssueMatch ApplyEdit(IssueMatch chosen, ManualEdit edit)
+		{
+			if (edit == null)
+			{
+				return chosen;
+			}
+			VolumeInfo volume = chosen.Volume?.Copy() ?? new VolumeInfo();
+			IssueInfo issue = chosen.Issue?.Copy() ?? new IssueInfo();
+			volume.Name = edit.Series;
+			volume.StartYear = edit.Year;
+			volume.Publisher = edit.Publisher;
+			issue.Number = edit.Number;
+			issue.Name = edit.Title;
+
+			// the extra data of the research with AI: what was found is added, an empty value leaves what the issue has
+			issue.Persons = edit.FromComicVine ? new List<Credit>() : new List<Credit>(issue.Persons);
+			AddCredits(issue, edit.Writer, "writer");
+			AddCredits(issue, edit.Penciller, "penciler"); // the role names are the ones of Comic Vine (see MetadataWriter.ParseRoles)
+			AddCredits(issue, edit.Inker, "inker");
+			AddCredits(issue, edit.Colorist, "colorist");
+			AddCredits(issue, edit.Letterer, "letterer");
+			AddCredits(issue, edit.CoverArtist, "cover");
+			AddCredits(issue, edit.Editor, "editor");
+			if (edit.FromComicVine)
+			{
+				issue.CoverDate = edit.CoverDate;
+				issue.StoreDate = edit.StoreDate;
+				issue.Description = edit.Summary;
+				issue.Characters = SplitNames(edit.Characters);
+				issue.Teams = SplitNames(edit.Teams);
+				issue.Locations = SplitNames(edit.Locations);
+				issue.StoryArcs = SplitNames(edit.StoryArcs);
+				issue.SiteUrl = edit.Web;
+				return new IssueMatch { Volume = volume, Issue = issue, Source = chosen.Source };
+			}
+			if (edit.CoverDate.Length > 0) { issue.CoverDate = edit.CoverDate; }
+			if (edit.StoreDate.Length > 0) { issue.StoreDate = edit.StoreDate; }
+			if (edit.Summary.Length > 0) { issue.Description = edit.Summary; }
+			if (edit.Characters.Length > 0) { issue.Characters = SplitNames(edit.Characters); }
+			if (edit.Teams.Length > 0) { issue.Teams = SplitNames(edit.Teams); }
+			if (edit.Locations.Length > 0) { issue.Locations = SplitNames(edit.Locations); }
+			if (edit.StoryArcs.Length > 0) { issue.StoryArcs = SplitNames(edit.StoryArcs); }
+			if (edit.Web.Length > 0) { issue.SiteUrl = edit.Web; }
+			return new IssueMatch { Volume = volume, Issue = issue, Source = chosen.Source };
 		}
 
 		/// <summary>
@@ -390,6 +567,10 @@ namespace ComicVineAI
 		/// </summary>
 		private bool TryAutomatically(IdentifyResult result)
 		{
+			if (ManualMode)
+			{
+				return false; // nothing is tagged by itself in manual mode
+			}
 			try
 			{
 				ComicBook book = result.Book;
@@ -405,6 +586,7 @@ namespace ComicVineAI
 				}
 				comicVine.LoadDetails(match.Issue, CancellationToken.None);
 				MetadataWriter.Write(book, match.Volume, match.Issue, options);
+				PageTypes.Apply(book, 0, null, settings.SetPageTypes); // the cover (the first page) was compared and agrees
 				if (taggedInReview.Add(result))
 				{
 					tagged++;
@@ -425,7 +607,11 @@ namespace ComicVineAI
 		private void Apply(ComicBook book, IssueMatch match, CancellationToken token)
 		{
 			comicVine.LoadDetails(match.Issue, token);
-			form.Invoke(new Action(() => MetadataWriter.Write(book, match.Volume, match.Issue, options)));
+			form.Invoke(new Action(() =>
+			{
+				MetadataWriter.Write(book, match.Volume, match.Issue, options);
+				PageTypes.Apply(book, 0, null, settings.SetPageTypes); // the cover (the first page) was compared and agrees
+			}));
 		}
 
 		private byte[] IssueCover(IssueMatch match, CancellationToken token)

@@ -21,7 +21,34 @@ namespace ComicVineAI
 		private static readonly Regex numberOf = new Regex(@"(?<![\d.])(\d{1,4}(?:\.\d+)?)\s+(?:of|de)\s+\d+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 		private static readonly Regex numberMarked = new Regex(@"(?:#|\bno\.?|\bn[º°o]\.?|\bnum\.?|\bissue\.?|\bnumero\b)\s*(\d{1,4}(?:\.\d+)?[a-z]?)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 		private static readonly Regex numberTrailing = new Regex(@"(?<![\d.])(\d{1,4}(?:\.\d+)?)\s*$", RegexOptions.Compiled);
+		private static readonly Regex explicitHash = new Regex(@"#\s*(\d{1,4}(?:\.\d+)?[a-z]?)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+		private static readonly Regex explicitBracket = new Regex(@"[\(\[]\s*(\d{1,3})\s*[\)\]]", RegexOptions.Compiled);
 		private static readonly Regex numberAnywhere = new Regex(@"\s(\d{1,4}(?:\.\d+)?)(?=\s|$)", RegexOptions.Compiled);
+
+		/// <summary>
+		/// The issue number of a file name when it is beyond doubt: written with a hash ("Batman #02") or alone between brackets
+		/// ("Batman (02)", "Batman [2]"; four digit years are not numbers, and two numbers between brackets are not clear). Empty otherwise.
+		/// Used to trust the name over what the cover seems to say when consecutive issues have the same cover.
+		/// </summary>
+		public static string ExplicitNumber(string fileName)
+		{
+			if (string.IsNullOrWhiteSpace(fileName))
+			{
+				return "";
+			}
+			string text = Path.GetFileNameWithoutExtension(fileName).Replace('_', ' ');
+			Match hash = explicitHash.Match(text);
+			if (hash.Success)
+			{
+				return hash.Groups[1].Value;
+			}
+			MatchCollection inBrackets = explicitBracket.Matches(text);
+			if (inBrackets.Count != 1 || Regex.IsMatch(brackets.Replace(text, " "), @"(?<![\d.])\d"))
+			{
+				return ""; // "Batman (3) 12": the number between brackets is a volume or a copy and the number is the other one
+			}
+			return inBrackets[0].Groups[1].Value;
+		}
 
 		public static ParsedName Parse(string fileName)
 		{

@@ -4,7 +4,7 @@ param([string]$ComicRackBin = "")
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-$arguments = @("build", "-c", "Release")
+$arguments = @("build", "-c", "Release", "-p:ReleaseBuild=true") # a release has no build stamp in its version
 if ($ComicRackBin) { $arguments += "-p:ComicRackBin=$ComicRackBin" }
 & dotnet @arguments
 if ($LASTEXITCODE -ne 0) { throw "The build failed" }
