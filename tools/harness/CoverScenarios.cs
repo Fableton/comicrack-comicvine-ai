@@ -122,6 +122,7 @@ internal static class CoverScenarios
 			settings.UseCoverComparison = true;
 			settings.ComicVineApiKey = ""; // never the real key
 		}
+		settings.UseClaude = Environment.GetEnvironmentVariable("CVAI_CLAUDE") == "1"; // to try what happens when Claude is on (installed or not)
 		ComicVineClient client = new ComicVineClient("", new DiskCache(Path.Combine(folder, "cache"), 1), new UsageTracker(folder), s => { }, db);
 		using (Bitmap cover = new Bitmap(imagePath))
 		{

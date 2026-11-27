@@ -182,6 +182,7 @@ namespace ComicVineAI
 			};
 			Button detect = new Button { Text = Loc.T("settings.detect"), AutoSize = true };
 			detect.Click += (s, e) => UpdateClaudeStatus();
+			claudePath.Leave += (s, e) => UpdateClaudeStatus(); // a path typed by hand
 			AddRow(table, Loc.T("settings.claudePath"), claudePath, 0, browse);
 			AddRow(table, Loc.T("settings.claudeModel"), claudeModel, 0, detect);
 			AddWide(table, claudeStatus);
@@ -284,6 +285,23 @@ namespace ComicVineAI
 			control.Margin = new Padding(Ui.Px(3), Ui.Px(5), Ui.Px(3), Ui.Px(3));
 			table.Controls.Add(control, 0, row);
 			table.SetColumnSpan(control, 3);
+			if (control is CheckBox box)
+			{
+				// a long text (and French is long) wraps to the width of the tab instead of being cut
+				box.AutoSize = false;
+				box.CheckAlign = ContentAlignment.TopLeft;
+				box.TextAlign = ContentAlignment.TopLeft;
+				void Fit()
+				{
+					int width = Math.Max(Ui.Px(200), table.ClientSize.Width - box.Margin.Horizontal - SystemInformation.VerticalScrollBarWidth - Ui.Px(8));
+					Size text = TextRenderer.MeasureText(box.Text, box.Font, new Size(width - Ui.Px(22), int.MaxValue), TextFormatFlags.WordBreak);
+					box.Size = new Size(width, text.Height + Ui.Px(4));
+				}
+				table.Resize += (s, e) => Fit();
+				box.TextChanged += (s, e) => Fit();
+				box.FontChanged += (s, e) => Fit();
+				Fit();
+			}
 		}
 
 		// ---- values ------------------------------------------------------------------------------------------
@@ -380,6 +398,9 @@ namespace ComicVineAI
 			string found = ClaudeCli.FindExecutable(new PluginSettings { ClaudePath = claudePath.Text });
 			claudeStatus.Text = found == null ? Loc.T("settings.claudeNotFound") : Loc.T("settings.claudeFound", found);
 			claudeStatus.ForeColor = found == null ? Color.Firebrick : SystemColors.ControlText;
+			// without the executable the options of Claude do nothing: they are disabled (the path can still be set)
+			useClaude.Enabled = found != null;
+			aiChrome.Enabled = found != null;
 		}
 
 		private void Apply()

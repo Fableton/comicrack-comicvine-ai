@@ -120,7 +120,8 @@ per API key. To stay well under it:
 - The progress window shows the calls of the run and of the last hour.
 
 ## Settings (Configure action, stored in `settings.json`)
-- Comic Vine API key (get yours at https://comicvine.gamespot.com/api/)
+- Comic Vine API key (get yours at https://comicvine.gamespot.com/api/) and/or a local Comic Vine database: one of the two is
+  needed. With the database alone nothing goes to the API.
 - Accept threshold, prefer the original publication (for localized reprints), cover comparison on/off
 - Claude CLI on/off, executable path and model. **The cover image is sent to Claude when this is on.**
 - Ask "automatic or manual?" before every run (on by default), and manual mode: every book goes to the review window, with the
@@ -132,7 +133,8 @@ the publisher's page, text copied from there. **The cover, the file name, your l
 Claude may open the links of the context** (its web fetch tool; and Chrome through Claude in Chrome when the setting allows it, for
 pages it cannot read directly). It fills in the identification and also creators, dates, summary, characters, teams, locations and
 story arcs when its sources say them. Nothing is written until you check and correct everything in the window; the books written
-this way have no Comic Vine key and get the tag `ClaudeInfo`. The button is only there when "use Claude" is on.
+this way have no Comic Vine key and get the tag `ClaudeInfo`. The button is enabled only when "use Claude" is on and the `claude`
+executable is found. Without Claude the plugin works the same, only the books it is not sure about go to the review.
 
 ## Install
 Download `ComicVineAI-vX.Y.Z.zip` from the Releases page, close ComicRack and unpack the `Comic Vine AI` folder into the `Scripts`

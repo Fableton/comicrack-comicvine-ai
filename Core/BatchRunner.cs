@@ -104,7 +104,7 @@ namespace ComicVineAI
 		private void Work(ComicBook[] books)
 		{
 			CancellationToken token = form.Token;
-			Log("Write options - " + options);
+			FileLog.Write("Write options - " + options); // a diagnostic line for the log file, not for the window
 			identifier = new Identifier(settings, options, comicVine, new SeriesChoices(pluginFolder), new ClaudeCache(pluginFolder), GetCover, Status);
 			identifier.CandidateCompared = OnCandidate;
 			List<IdentifyResult> deferred = new List<IdentifyResult>();
@@ -152,6 +152,13 @@ namespace ComicVineAI
 							form.EndBook(i, Outcome.Review, guess, Loc.T(result.Accepted ? "batch.manualOnlyStatus" : "batch.needsHelp", ClaudeNote(result)), result.Best?.Confidence ?? -1, IssueCover(result.Best, CancellationToken.None));
 						}
 						processed = i + 1;
+					}
+					catch (ComicVineException e) when (e.StatusCode == 100 && localDb != null)
+					{
+						// no API key, and this book needs something the local database does not have: only this book goes to the review
+						processed = i + 1;
+						Log(Loc.T("batch.error", name, e.Message));
+						AddForReview(deferred, book, i, Loc.T("batch.errorTitle"), Outcome.Error, e.Message);
 					}
 					catch (ComicVineException e) when (e.StatusCode == 100)
 					{
@@ -300,8 +307,14 @@ namespace ComicVineAI
 					manual.CountRemaining = () => RemainingOfSeries(deferred, index, result.Hints).Count;
 					manual.IsUnwantedPublisher = IsUnwanted;
 					manual.SetUnwantedPublisher = SetUnwanted;
-					manual.SuggestedVolume = identifier.SuggestedVolumeFor(result.Hints) ?? (ManualMode ? result.Best?.Volume : null);
-					if (settings.UseClaude)
+					// the volume remembered for this series name, then the series Claude named (found with its number), then a volume accepted for a
+					// related name ("The Mighty Thor 373" must not open "The Mighty Thor (2011)" when Claude said "Thor" and Thor (1966) has #373)
+					manual.SuggestedVolume = identifier.RememberedVolume(result.Hints)
+						?? (result.Best != null && result.Best.Source == "claude" && result.Best.NameScore >= 0.9 ? result.Best.Volume : null)
+						?? identifier.SuggestedVolumeFor(result.Hints)
+						?? (ManualMode ? result.Best?.Volume : null);
+					manual.AiUnavailableReason = !settings.UseClaude ? Loc.T("manual.aiOff") : Loc.T("manual.aiNotFound");
+					if (settings.UseClaude && ClaudeCli.FindExecutable(settings) != null)
 					{
 						// "research with AI": the cover goes to Claude only when the user turned Claude on and asks for it
 						manual.AskClaude = (page, context, token) => ClaudeCli.WithFileNumber(ClaudeCli.Research(page, result.Hints, context, settings, Log, token), result.Hints);

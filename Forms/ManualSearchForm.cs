@@ -60,6 +60,11 @@ namespace ComicVineAI
 		private readonly Button coverButton = new Button { Text = Loc.T("manual.otherCovers"), AutoSize = true, Visible = false, Anchor = AnchorStyles.Left };
 		private readonly ContextMenuStrip volumeMenu = new ContextMenuStrip();
 		private readonly ContextMenuStrip pageMenu = new ContextMenuStrip();
+		private readonly CheckBox isCoverBox = new CheckBox { AutoSize = false, AutoEllipsis = true, Dock = DockStyle.Fill, Height = Ui.Px(24), Margin = new Padding(Ui.Px(3), Ui.Px(3), Ui.Px(3), Ui.Px(3)) };
+		private readonly HashSet<int> autoCoverPages = new HashSet<int>(); // pages marked as the cover because they look like the Comic Vine cover
+		private bool showingCoverBox;
+		private readonly ToolTip coverTip = new ToolTip();
+		private const double CoverAgrees = 0.62; // the similarity from which the page on screen is taken for the cover (the engine's cover floor)
 		private readonly Label pageTypeLabel = new Label { AutoSize = true, Visible = false, ForeColor = Color.DarkBlue, Margin = new Padding(Ui.Px(8), Ui.Px(7), Ui.Px(3), 0) };
 		private List<VolumeInfo> allVolumes = new List<VolumeInfo>();
 		private List<string> coverUrls; // the main cover and the alternatives of the selected issue, once they are known
@@ -116,10 +121,13 @@ namespace ComicVineAI
 		public bool ApplyToRemaining { get; private set; }
 
 		/// <summary>
-		/// Asks Claude about a cover (the image, the context that the user wrote, the cancellation) and gives its answer. Set by the caller; the "research with AI" button is
-		/// only there when it is set. Runs on a worker thread.
+		/// Asks Claude about a cover (the image, the context that the user wrote, the cancellation) and gives its answer. Set by the caller; without it
+		/// the "research with AI" button is disabled. Runs on a worker thread.
 		/// </summary>
 		public Func<Bitmap, string, CancellationToken, ClaudeSuggestion> AskClaude { get; set; }
+
+		/// <summary>Why Claude cannot be used (shown as the tooltip of the disabled AI button), when <see cref="AskClaude"/> is not set.</summary>
+		public string AiUnavailableReason { get; set; } = "";
 
 		/// <summary>
 		/// What the user changed or typed in the edit window. When the form closes with OK and this is set, it replaces what Comic Vine says
@@ -155,7 +163,7 @@ namespace ComicVineAI
 			{
 				series.Text = claude.Series;
 				number.Text = NumberToStart(bookHints, claude);
-				year.Text = claude.VolumeYear > 0 ? claude.VolumeYear.ToString() : "";
+				year.Text = ""; // the year Claude gives is often wrong, and the list is ordered by it before the name
 				publisher.Text = claude.Publisher;
 			}
 			else
@@ -228,7 +236,32 @@ namespace ComicVineAI
 			Shown += (s, e) =>
 			{
 				useCoverButton.Visible = Rescan != null; // set by the caller after the window is built
-				aiButton.Visible = AskClaude != null;
+				aiButton.Enabled = AskClaude != null; // without Claude the button is there, disabled, and says why
+				if (AskClaude == null && AiUnavailableReason.Length > 0 && aiButton.Parent != null)
+				{
+					// a disabled button shows no tooltip of its own: its container shows the reason while the mouse is over it
+					Control host = aiButton.Parent;
+					ToolTip why = new ToolTip();
+					bool shown = false;
+					host.MouseMove += (s2, e2) =>
+					{
+						bool over = aiButton.Bounds.Contains(e2.Location);
+						if (over && !shown)
+						{
+							why.Show(AiUnavailableReason, host, aiButton.Left, aiButton.Bottom + Ui.Px(4), 8000);
+						}
+						else if (!over && shown)
+						{
+							why.Hide(host);
+						}
+						shown = over;
+					};
+					host.MouseLeave += (s2, e2) =>
+					{
+						why.Hide(host);
+						shown = false;
+					};
+				}
 				int remaining = CountRemaining?.Invoke() ?? 0;
 				useRestButton.Text = Loc.T("manual.useRest", remaining);
 				useRestButton.Visible = remaining > 0;
@@ -284,11 +317,25 @@ namespace ComicVineAI
 			bookView.Dock = DockStyle.Fill;
 			issueView.Dock = DockStyle.Fill;
 
-			TableLayoutPanel left = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+			TableLayoutPanel left = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+			left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 			left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 			left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-			left.Controls.Add(bookView, 0, 0);
-			left.Controls.Add(BuildPageBar(), 0, 1);
+			isCoverBox.Text = Loc.T("manual.isCover");
+			isCoverBox.CheckedChanged += (s, e) =>
+			{
+				if (showingCoverBox)
+				{
+					return;
+				}
+				// the user decides: from now on this page keeps what was chosen, whatever the covers say
+				autoCoverPages.Remove(currentPage);
+				PageTypeChanges[currentPage] = isCoverBox.Checked ? ComicPageType.FrontCover : ComicPageType.Story;
+				ShowPageType();
+			};
+			left.Controls.Add(isCoverBox, 0, 0);
+			left.Controls.Add(bookView, 0, 1);
+			left.Controls.Add(BuildPageBar(), 0, 2);
 			new ToolTip().SetToolTip(bookView, Loc.T("manual.tooltip"));
 
 			issuesPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -513,6 +560,7 @@ namespace ComicVineAI
 				ToolStripMenuItem item = new ToolStripMenuItem(PageTypeName(type)) { Tag = type };
 				item.Click += (s, e) =>
 				{
+					autoCoverPages.Remove(currentPage);
 					PageTypeChanges[currentPage] = chosen;
 					ShowPageType();
 				};
@@ -545,7 +593,35 @@ namespace ComicVineAI
 		{
 			ComicPageType type = CurrentPageType();
 			pageTypeLabel.Text = Loc.T("manual.pageType", PageTypeName(type));
-			pageTypeLabel.Visible = type != ComicPageType.Story;
+			pageTypeLabel.Visible = type != ComicPageType.Story && type != ComicPageType.FrontCover; // the cover is shown by the check box
+			showingCoverBox = true;
+			isCoverBox.Checked = type == ComicPageType.FrontCover;
+			isCoverBox.Text = autoCoverPages.Contains(currentPage) && similarity >= 0
+				? Loc.T("manual.isCoverMatched", similarity.ToString("P0"))
+				: Loc.T("manual.isCover");
+			coverTip.SetToolTip(isCoverBox, isCoverBox.Text); // the whole text, when the panel is too narrow for it
+			showingCoverBox = false;
+		}
+
+		/// <summary>
+		/// The page on screen is marked as the cover while it looks like the cover of the issue that is shown, unless the user chose its type.
+		/// </summary>
+		private void MarkCoverByComparison()
+		{
+			bool userChose = PageTypeChanges.ContainsKey(currentPage) && !autoCoverPages.Contains(currentPage);
+			if (!userChose)
+			{
+				if (similarity >= CoverAgrees)
+				{
+					PageTypeChanges[currentPage] = ComicPageType.FrontCover;
+					autoCoverPages.Add(currentPage);
+				}
+				else if (autoCoverPages.Remove(currentPage))
+				{
+					PageTypeChanges.Remove(currentPage);
+				}
+			}
+			ShowPageType();
 		}
 
 		private static string PageTypeName(ComicPageType type)
@@ -670,7 +746,7 @@ namespace ComicVineAI
 			{
 				series.Text = claude.Series;
 				number.Text = NumberToStart(bookHints, claude);
-				year.Text = claude.VolumeYear > 0 ? claude.VolumeYear.ToString() : "";
+				year.Text = ""; // the year Claude gives is often wrong
 				publisher.Text = claude.Publisher;
 			}
 			else if (found.Best != null)
@@ -1186,6 +1262,7 @@ namespace ComicVineAI
 			{
 				similarity = bookFingerprint.Similarity(CoverFingerprint.From(issueView.Image));
 			}
+			MarkCoverByComparison();
 			if (foundIssue == null)
 			{
 				VolumeInfo shown = inIssues ? browsing : SelectedVolumeItem;

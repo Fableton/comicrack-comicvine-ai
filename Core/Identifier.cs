@@ -152,14 +152,33 @@ namespace ComicVineAI
 					result.Claude = AskClaude(cover, result.Hints, token);
 					if (result.Claude != null && result.Claude.IsUsable)
 					{
-						BookHints claudeHints = new BookHints { Year = result.Claude.Year, Publisher = result.Claude.Publisher, FileName = result.Hints.FileName };
+						BookHints claudeHints = new BookHints { Year = 0, Publisher = result.Claude.Publisher, FileName = result.Hints.FileName };
 						claudeHints.SeriesNames.Add(result.Claude.Series);
 						if (!string.IsNullOrWhiteSpace(result.Claude.Number))
 						{
 							claudeHints.Numbers.Add(result.Claude.Number);
 						}
 						log(Loc.T("id.claudeSuggests", claudeHints, result.Claude.VolumeYear, result.Claude.Confidence.ToString("P0")));
-						result.Candidates.AddRange(Resolve(claudeHints, fingerprint, result.Claude.VolumeYear, "claude", token));
+						List<IssueMatch> found = Resolve(claudeHints, fingerprint, 0, "claude", token);
+						if (result.Claude.VolumeYear > 0)
+						{
+							// The year is not reliable enough to search with, but when several volumes have the same name and the number
+							// ("X-Factor" 1986 and 2006 both have #32) and the covers do not tell them apart, the one of the year Claude gave goes first.
+							foreach (IssueMatch m in found.Where(m => m.Volume.StartYear == result.Claude.VolumeYear && m.Confidence < settings.AcceptThreshold))
+							{
+								m.Confidence = Math.Min(m.Confidence + 0.02, settings.AcceptThreshold - 0.01);
+							}
+							found = found.OrderByDescending(m => m.Confidence).ToList();
+						}
+						IssueMatch agreed = found.FirstOrDefault();
+						if (agreed != null && result.Claude.Confidence >= ClaudeSure && agreed.CoverScore >= ClaudeCoverAgrees && agreed.NameScore >= 0.9
+							&& !agreed.NumberDiffers && SamePublisher(agreed.Volume, claudeHints.Publisher))
+						{
+							// Claude is sure, the series it named (and the publisher) has the number, and the cover looks like it: two pieces of
+							// evidence that do not depend on each other, enough to accept a cover too edited to be accepted on its own.
+							agreed.Confidence = Math.Max(agreed.Confidence, settings.AcceptThreshold);
+						}
+						result.Candidates.AddRange(found);
 						Decide(result);
 					}
 				}
@@ -339,7 +358,29 @@ namespace ComicVineAI
 				}
 				ranked = ranked.OrderByDescending(m => m.Confidence).ToList();
 			}
+			if (settings.PreferOriginal && ranked.Count > 0 && ranked[0].NumberDiffers && ranked[0].Confidence >= settings.AcceptThreshold
+				&& ranked.Any(m => !m.NumberDiffers && m.NameScore >= ranked[0].NameScore && m.Volume.StartYear > 0 && m.Volume.StartYear < ranked[0].Volume.StartYear))
+			{
+				// The cover points to another number in a later volume of the same name (a local edition that reprints the original:
+				// Spawn #43 of 1992 is Spawn #199801 of Egmont in 1996), while an older volume has the number of the file: not sure enough.
+				ranked[0].Confidence = settings.AcceptThreshold - 0.01;
+			}
 			return ranked;
+		}
+
+		private const double ClaudeSure = 0.80; // Claude's own confidence for its answer to count as evidence
+		private const double ClaudeCoverAgrees = 0.70; // the cover score that, with Claude's answer, accepts a book
+
+		/// <summary>True when no publisher is given or the volume is of that publisher.</summary>
+		private static bool SamePublisher(VolumeInfo volume, string publisher)
+		{
+			if (string.IsNullOrWhiteSpace(publisher))
+			{
+				return true;
+			}
+			string a = TextMatch.Normalize(volume.Publisher ?? "");
+			string b = TextMatch.Normalize(publisher);
+			return a.Length > 0 && (a.Contains(b) || b.Contains(a) || TextMatch.Similarity(a, b) >= 0.8);
 		}
 
 		private const int DeepVolumes = 5; // series whose covers are compared when the number of the file does not settle it
@@ -595,6 +636,12 @@ namespace ComicVineAI
 					match.Penalty = 0.75; // an individual issue is preferred: a collected edition has to be much better to win
 				}
 				match.Confidence = Combine(volumeScore, match.CoverScore) * match.Penalty;
+				if (source == "claude" && match.CoverScore >= 0 && nameScore >= 0.9 && SamePublisher(volume, hints.Publisher))
+				{
+					// Claude named this series (and its publisher) and the number exists in it: a cover edited beyond recognition (translated, new
+					// lettering) must not sink it below a worse candidate. It gets what it would without a cover, never enough to be accepted by itself.
+					match.Confidence = Math.Max(match.Confidence, Math.Min(0.85 * volumeScore, settings.AcceptThreshold - 0.01) * match.Penalty);
+				}
 				if (candidateCover != null)
 				{
 					CandidateCompared?.Invoke(match, candidateCover);

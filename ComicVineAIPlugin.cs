@@ -88,7 +88,7 @@ namespace ComicVineAI
 			PluginSettings settings = PluginSettings.Load(ScriptPath);
 			Ui.FontScale = (float)Math.Max(0.8, Math.Min(2.5, settings.FontScale));
 			Loc.Initialize(settings.Language, ScriptPath);
-			if (string.IsNullOrWhiteSpace(settings.ComicVineApiKey) && !Configure(settings))
+			if (!HasSource(settings) && !Configure(settings))
 			{
 				return;
 			}
@@ -122,7 +122,17 @@ namespace ComicVineAI
 			}
 			settings.Save(ScriptPath);
 			Loc.Initialize(settings.Language, ScriptPath); // the language that was just chosen applies from now on
-			return !string.IsNullOrWhiteSpace(settings.ComicVineApiKey);
+			if (!HasSource(settings))
+			{
+				MessageBox.Show(ComicRack.MainWindow, Loc.T("plugin.noSource"), AppInfo.NameAndVersion, MessageBoxButtons.OK, MessageBoxIcon.Information);
+				return false;
+			}
+			return true;
 		}
+
+		/// <summary>Comic Vine can be asked: with an API key, or with the local database alone (then nothing goes to the API).</summary>
+		private static bool HasSource(PluginSettings settings) =>
+			!string.IsNullOrWhiteSpace(settings.ComicVineApiKey)
+			|| (!string.IsNullOrWhiteSpace(settings.LocalDbPath) && System.IO.File.Exists(settings.LocalDbPath));
 	}
 }

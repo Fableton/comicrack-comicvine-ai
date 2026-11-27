@@ -106,6 +106,11 @@ namespace ComicVineAI
 			{
 				trimmed = "0" + trimmed;
 			}
+			int dot = trimmed.IndexOf('.');
+			if (dot > 0 && trimmed.Substring(dot + 1).All(c => c == '0'))
+			{
+				trimmed = trimmed.Substring(0, dot); // "12.0" is #12
+			}
 			return trimmed.ToLowerInvariant();
 		}
 	}

@@ -63,7 +63,7 @@ namespace ComicVineAI
 				{
 					if (stream == null)
 					{
-						throw new InvalidOperationException("The SQLite library for " + arch + " is not embedded in the plugin.");
+						throw new InvalidOperationException(Loc.T("sqlite.notEmbedded", arch));
 					}
 					using (MemoryStream ms = new MemoryStream())
 					{
@@ -100,7 +100,7 @@ namespace ComicVineAI
 				}
 				if (LoadLibrary(file) == IntPtr.Zero)
 				{
-					throw new InvalidOperationException("Cannot load " + file + " (error " + Marshal.GetLastWin32Error() + ").");
+					throw new InvalidOperationException(Loc.T("sqlite.cannotLoad", file, Marshal.GetLastWin32Error()));
 				}
 				loaded = true;
 			}
