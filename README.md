@@ -4,6 +4,63 @@
 selected comics on Comic Vine and tags them, like the Python Comic Vine Scraper but with cover comparison and
 an AI fallback.
 
+## Features
+**Identification**
+- Identifies the selected books from their metadata and file name, with a Comic Vine search scored by name, year and publisher.
+- Compares the first page with the Comic Vine cover and its alternative covers. The comparison tolerates crops, scans, logo
+  strips and barcodes.
+- When the file's number does not settle it, a deep cover search compares several series and the issues around that number.
+- Optional **Claude fallback** (`claude -p`): Claude looks at the cover and names the original publication. When Claude is sure
+  and the series, the publisher and the cover agree, the book is accepted.
+- Automatic tagging above a confidence threshold (80% by default). The rest go to the manual review.
+- Localized reprints (Panini, Zinco, Egmont...): unwanted publishers are skipped, and *prefer the original publication* tags
+  the original issue.
+- Individual issues are preferred over collected editions (TPB, hardcover, omnibus). Books that were already scraped can be
+  skipped.
+- Learns as it goes: the series of a book is remembered between runs, and a volume accepted for one book is tried first for the
+  related series names of the others.
+
+**Tagging (same data as the Python Comic Vine Scraper)**
+- Same fields, roles, imprint table, summary cleanup and date rules, plus the `CVDB<id>` key and the `comicvine_issue` /
+  `comicvine_volume` custom values.
+- You choose which fields are written, whether existing values are replaced, whether empty values may replace existing
+  ones, and whether imprints are converted. Also: the key in Tags and/or Notes, publisher aliases and custom imprints.
+- Optional page types: the matched page is marked as the front cover and the others as story pages.
+
+**Modes and windows**
+- **Automatic** or **manual** mode, chosen before every run or fixed in the settings. In manual mode every book goes to the
+  review with the match found.
+- The progress window shows your cover next to the best candidate, with the confidence, live counters and the Comic Vine calls
+  used. *Cancel* keeps the work already done.
+- **Manual review window**:
+  - Series and their issues, with sortable columns, a match percentage and cover similarity.
+  - Alternative covers and a link to open the issue on Comic Vine.
+  - A page viewer with zoom, page types and copying of a page.
+  - "This page is the cover" (detected automatically) and "use this page as the cover and search again".
+  - *Previous book*, *Use for the rest* (tags the other books of the series by their own numbers), and *Edit data* before
+    writing.
+  - Unwanted publishers can be added or removed with a right click.
+- **Research with AI**: Claude studies the page on screen and the context you give it (notes, links) and fills in the
+  identification and the credits. Nothing is written until you check it.
+
+**Comic Vine API budget**
+- A disk cache, one call to list a volume, remembered series, and alternative covers only when they are needed.
+- Counts the calls of the last hour per resource and waits (with a countdown you can cancel) before the 200/hour limit. Every
+  call is listed in `calls.log`.
+- Claude's answers are remembered by the fingerprint of the cover (`claude-cache.json`), so the same cover is never sent twice.
+
+**Local Comic Vine database (optional)**
+- A SQLite copy of Comic Vine (SQLite is embedded in the DLL) answers the searches, issues, credits and descriptions with no
+  calls. The search is much more thorough, and it works without an API key.
+
+**Other**
+- English, Spanish and French, following ComicRack's language. Other languages can be added with a `languages\<code>.json`
+  file.
+- DPI-aware windows with adjustable text size, and a log of each run in `plugin.log`.
+- A single DLL. It reads no other plugin's configuration.
+
+The sections below explain each part in detail.
+
 ## How it works
 For each selected book, one by one:
 1. **Hints**: current metadata (series, number, year, publisher) plus the file name.
